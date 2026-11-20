@@ -1,5 +1,7 @@
 // Backend registry. To add another agent CLI, implement the same three methods
-// (`check`, `listModels` and `run`) in a new file and register it here.
+// (`check`, `listModels` and `run`) in a new file and register it here. A backend also
+// has a `name` (what --backend takes), a `label` (the product, as in "Codex") and an
+// `agentName` (how the agent is shown to the user while it works, as in "Codex Agent").
 import { agyBackend } from "./agy.mjs";
 import { codexBackend } from "./codex.mjs";
 

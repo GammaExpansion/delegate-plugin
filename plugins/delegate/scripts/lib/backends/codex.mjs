@@ -42,6 +42,11 @@ const POLICY = {
   bypassPermissions: { sandbox: "danger-full-access", approvalPolicy: "never", approvalsReviewer: "user", whenAsked: "refuse" }
 };
 
+// Codex normally says when a turn is over. If its final answer has arrived, none of its
+// own agents is still at work, and that word has not come after this long, the turn is
+// taken as finished. Without this a lost notification would leave the job running forever.
+const INFERRED_FINISH_MS = 1500;
+
 // The sandbox as a full policy object. It is sent with every turn, so that a resumed
 // conversation takes this turn's sandbox, not that of its last turn, and so that the
 // user's own Codex config cannot widen or narrow what a mode means.
@@ -95,6 +100,8 @@ function toAction(item) {
       return { kind: "tool", title: `${item.server}.${item.tool}`, status: item.status };
     case "webSearch":
       return { kind: "search", title: item.query ?? "web search", status: "completed" };
+    case "collabAgentToolCall":
+      return { kind: "subagent", title: item.tool ?? "collaboration", status: item.status };
     default:
       return null;
   }
@@ -103,6 +110,7 @@ function toAction(item) {
 export const codexBackend = {
   name: "codex",
   label: "Codex",
+  agentName: "Codex Agent",
 
   check() {
     const info = { installed: false, version: null, auth: "unknown", hint: null };
@@ -188,9 +196,64 @@ export const codexBackend = {
     let cancelled = false;
     let stopGrace = () => {};
 
+    // Codex can start agents of its own. Each works in a thread of its own and reports
+    // on this same connection. What they do is shown as progress under their name, and
+    // the turn is not over while one of them is still at work.
+    const subagentNames = new Map();
+    const busySubagents = new Set();
+    const openCollaborations = new Set();
+    let unnamedSubagents = 0;
+    const nameSubagent = (id, thread = {}) => {
+      const name = thread.name ?? thread.agentNickname ?? thread.agentRole;
+      if (id && name) subagentNames.set(id, name);
+    };
+    // One that Codex gave no name gets a number the first time it is mentioned.
+    const subagentName = (id) => {
+      if (!subagentNames.has(id)) subagentNames.set(id, `agent ${(unnamedSubagents += 1)}`);
+      return subagentNames.get(id);
+    };
+
+    let finalAnswerSeen = false;
+    let inferTimer = null;
+    let finishByInference = () => {};
+    const considerInferredFinish = () => {
+      clearTimeout(inferTimer);
+      if (!finalAnswerSeen || openCollaborations.size || busySubagents.size) return;
+      inferTimer = setTimeout(() => {
+        if (openCollaborations.size || busySubagents.size || finishedTurns.has(turnId)) return;
+        onEvent({ type: "note", text: "Codex gave its final answer but did not report the turn as finished; taking it as finished" });
+        finishByInference();
+      }, INFERRED_FINISH_MS);
+      inferTimer.unref();
+    };
+
+    const onSubagentEvent = (method, params) => {
+      const who = `subagent ${subagentName(params.threadId)}`;
+      switch (method) {
+        case "turn/started":
+          busySubagents.add(params.threadId);
+          return;
+        case "turn/completed":
+          busySubagents.delete(params.threadId);
+          considerInferredFinish();
+          return;
+        case "item/completed": {
+          const item = params?.item ?? {};
+          if (item.type === "agentMessage" && item.text) {
+            onEvent({ type: "progress", text: `${who}: ${clipHead(item.text, 600)}` });
+          } else if (item.type === "commandExecution") {
+            onEvent({ type: "progress", text: `${who} ran: ${oneLine(item.command)} (exit ${item.exitCode ?? "?"})` });
+          }
+          return;
+        }
+        default:
+      }
+    };
+
     client.onNotification = (method, params) => {
-      // Sub-agent threads report on the same connection; only the main thread counts.
-      if (threadId && params?.threadId && params.threadId !== threadId) return;
+      if (method === "thread/started") return nameSubagent(params?.thread?.id, params?.thread);
+      if (method === "thread/name/updated") return nameSubagent(params?.threadId, { name: params?.threadName });
+      if (threadId && params?.threadId && params.threadId !== threadId) return onSubagentEvent(method, params);
       switch (method) {
         case "item/started": {
           const item = params?.item ?? {};
@@ -198,15 +261,28 @@ export const codexBackend = {
           if (item.type === "commandExecution") {
             onEvent({ type: "progress", text: `running command: ${oneLine(item.command)}` });
           }
+          if (item.type === "collabAgentToolCall") {
+            openCollaborations.add(item.id);
+            const names = (item.receiverThreadIds ?? []).map(subagentName).join(", ");
+            onEvent({ type: "progress", text: `starting subagent: ${names || item.tool || "collaboration"}` });
+          }
           return;
         }
         case "item/completed": {
           const item = params?.item ?? {};
           pendingFileChanges.delete(item.id);
+          if (item.type === "collabAgentToolCall") {
+            openCollaborations.delete(item.id);
+            considerInferredFinish();
+          }
           if (item.type === "agentMessage" && item.text) {
             messages.push({ text: item.text, phase: item.phase ?? null });
             // The final answer is delivered as the result; only interim messages are progress.
             if (item.phase !== "final_answer") onEvent({ type: "progress", text: `message: ${clipHead(item.text)}` });
+            else {
+              finalAnswerSeen = true;
+              considerInferredFinish();
+            }
             return;
           }
           if (item.type === "reasoning") {
@@ -314,6 +390,8 @@ export const codexBackend = {
       }
 
       const runTurn = async (text) => {
+        finalAnswerSeen = false;
+        clearTimeout(inferTimer);
         const started = await client.request("turn/start", {
           threadId,
           input: [{ type: "text", text, text_elements: [] }],
@@ -327,6 +405,7 @@ export const codexBackend = {
           const settle = () => {
             if (finishedTurns.has(turnId)) resolve(finishedTurns.get(turnId));
           };
+          finishByInference = () => resolve({ status: "completed", error: null });
           notifyTurnFinished = settle;
           settle();
           client.failure.catch(reject);
@@ -367,6 +446,7 @@ export const codexBackend = {
       };
     } finally {
       stopGrace();
+      clearTimeout(inferTimer);
       signal?.removeEventListener("abort", interrupt);
       await client.close();
     }

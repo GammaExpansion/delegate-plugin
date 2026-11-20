@@ -12,6 +12,7 @@ import { BACKENDS, getBackend } from "./lib/backends/index.mjs";
 import { FALLBACK_MODE, MODES, resolvePermissionMode } from "./lib/permission.mjs";
 import {
   renderJobDetail,
+  agentOf,
   renderModels,
   renderPending,
   renderResult,
@@ -217,9 +218,9 @@ async function runJob(cwd, id) {
     // Recorded first, logged second. In the other order a follower could read the log
     // line, miss the request, and then sit out its whole wait before seeing it.
     updateJob(cwd, id, {
-      pending: { id: requestId, label: backend.label, ...request, askedAt: nowIso(), logOffset: logSize(cwd, id) }
+      pending: { id: requestId, label: backend.agentName, ...request, askedAt: nowIso(), logOffset: logSize(cwd, id) }
     });
-    appendLog(cwd, id, `waiting for the user · ${requestId}: ${backend.label} asks to ${request.summary}`);
+    appendLog(cwd, id, `waiting for the user · ${requestId}: ${backend.agentName} asks to ${request.summary}`);
     waitingForUser = true;
     const waitSec = approvalWaitSeconds();
     const deadline = Date.now() + waitSec * 1000;
@@ -346,7 +347,7 @@ async function cmdTask(argv) {
   }
   const backendName = options.backend ?? resume?.backend;
   if (!backendName) throw new Error(`Missing --backend. Choose one of: ${Object.keys(BACKENDS).join(", ")}.`);
-  getBackend(backendName);
+  const backend = getBackend(backendName);
 
   if (resume) {
     // One turn at a time per session: two writers on one session lose or reject a turn.
@@ -368,6 +369,8 @@ async function cmdTask(argv) {
   const job = writeJob(cwd, {
     id: newJobId(),
     backend: backendName,
+    // How the agent is named wherever the job is shown. The model joins it once known.
+    agentName: backend.agentName,
     cwd,
     // Set when the task was started inside a linked git worktree, as happens when Claude
     // Code runs the subagent with worktree isolation. The delegate's edits are there.
@@ -554,7 +557,7 @@ async function cmdFollow(argv) {
   if (shown) console.log(shown);
   if (isActive(job)) {
     const state = job.pending ? "waiting-for-approval" : job.status;
-    console.log(`[follow] job=${job.id} state=${state} next-offset=${nextOffset}`);
+    console.log(`[follow] job=${job.id} state=${state} next-offset=${nextOffset} agent="${agentOf(job)}"`);
     if (job.pending) console.log(renderPending(job));
     return 0;
   }

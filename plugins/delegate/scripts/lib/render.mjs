@@ -28,9 +28,15 @@ const modeOf = (job) => job.permissionMode ?? FALLBACK_MODE;
 const worktreeLine = (job) =>
   `worktree: ${job.worktree.path}${job.worktree.branch ? `  (branch ${job.worktree.branch})` : ""}`;
 
+/** Who is doing the work: the agent's name, with the model once the job knows it. */
+export function agentOf(job) {
+  const name = job.agentName ?? job.backend;
+  return job.model ? `${name} (${job.model})` : name;
+}
+
 function headline(job) {
   return [
-    `[delegate] ${job.backend}`,
+    `[delegate] ${agentOf(job)}`,
     job.id,
     job.status,
     formatDuration(jobDurationMs(job)),
@@ -52,7 +58,6 @@ export function renderResult(job) {
   if (job.sessionId) {
     lines.push(`session: ${job.sessionId}  (continue this conversation with: --resume ${job.sessionId})`);
   }
-  if (job.model) lines.push(`model: ${job.model}`);
   lines.push(`permission mode: ${modeOf(job)}  (${job.permissionSource ?? "not recorded"})`);
   if (job.worktree) lines.push(worktreeLine(job));
   if (result.error) lines.push(`error: ${result.error}`);
@@ -87,7 +92,7 @@ export function renderResult(job) {
 /** The request a job is waiting on, for the caller that has to put it to the user. */
 export function renderPending(job) {
   const { id, summary, detail } = job.pending;
-  const lines = ["=== APPROVAL NEEDED ===", `request: ${id}`, `${job.backend} asks to ${summary}`];
+  const lines = ["=== APPROVAL NEEDED ===", `request: ${id}`, `${agentOf(job)} asks to ${summary}`];
   for (const line of String(detail ?? "").split("\n")) if (line.trim()) lines.push(`  ${line}`);
   lines.push(`Put it to the user with: answer ${job.id} ${id} allow`);
   return lines.join("\n");
@@ -120,7 +125,6 @@ export function renderStatusList(jobs) {
 export function renderJobDetail(job, logTail) {
   const lines = [headline(job), `task: ${oneLine(job.prompt, 300)}`];
   if (job.sessionId) lines.push(`session: ${job.sessionId}`);
-  if (job.model) lines.push(`model: ${job.model}`);
   if (job.worktree) lines.push(worktreeLine(job));
   if (job.result?.error) lines.push(`error: ${job.result.error}`);
   if (logTail.length) lines.push("", "--- recent activity ---", ...logTail);

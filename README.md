@@ -157,6 +157,10 @@ Every task runs the same way:
 2. The subagent calls `follow <job-id> --offset <n>` in a loop. Each call returns what the delegate did since the last one: commands and their output, file edits, interim messages, reasoning summaries. After each call the subagent writes a one-line progress note. If the delegate needs your permission, `follow` returns with the request, and the subagent puts it to you (see [Permission model](#permission-model)).
 3. When the job has ended, `follow` prints the result and the subagent returns it unchanged.
 
+The delegate is shown as `Codex Agent` or `Gemini Agent`, with the model it is running on once that is known, as in `Codex Agent (gpt-6.2-astra)`. The name leads each progress note, each permission request, and the first line of the result.
+
+Codex can start agents of its own. What they do appears in the progress under their names (`subagent explorer: ...`), and is not part of the answer.
+
 `follow` returns when there is something to report, not on a timer. Once the delegate logs new activity, `follow` keeps collecting for a short settle window (6 seconds in a job's first minute, 15 up to five minutes, 30 after that) and returns that batch. If the delegate is silent it returns after 90 seconds. Progress therefore arrives in batches, not token by token.
 
 The forwarding subagent keeps everything it reads in its context, and that context lasts for the whole conversation. So `follow` shows a compact view by default: reasoning entries are left out, only the last two lines of a command's output are kept, and interim messages are cut short. The full log stays on disk.
@@ -344,6 +348,7 @@ Then add `agents/<name>.md` so Claude can call it as a subagent.
 - The permission hook starts a Node process before every Bash call in the session, not only the delegate's. It exits at once for commands that are not a delegate task.
 - If the hook does not run (the plugin's hooks are disabled, for instance), tasks without `--permission-mode` run in `default` mode, a task can name any mode without you being asked, and the forwarding subagent has no proper way to approve a request, so requests are refused.
 - agy has no login-status command. `/delegate:setup` treats a successful `agy models` call as proof of login, which has not been tested against a logged-out agy.
+- If Codex gives its final answer and then never reports the turn as finished, the job takes the turn as finished 1.5 seconds later, provided none of Codex's own agents is still at work.
 - `codex app-server` is marked experimental upstream and its protocol may change between versions. This plugin was tested with codex-cli 0.170.0 and agy 1.5.12.
 
 ## License

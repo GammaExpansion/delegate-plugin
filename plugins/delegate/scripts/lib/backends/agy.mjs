@@ -117,6 +117,7 @@ function pickOption(options, allow) {
 export const agyBackend = {
   name: "agy",
   label: "Antigravity",
+  agentName: "Gemini Agent",
 
   check() {
     const info = { installed: false, version: null, auth: "unknown", hint: null };

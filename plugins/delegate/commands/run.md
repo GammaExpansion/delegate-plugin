@@ -14,6 +14,7 @@ Choosing the subagent:
 - The first word names the backend. `codex` means `subagent_type: "delegate:codex"`. `agy`, `antigravity` or `gemini` means `subagent_type: "delegate:agy"`.
 - If no backend is named, ask the user which one they want before doing anything else.
 - These are subagents, not skills. Call them with `Agent`, never with `Skill`.
+- Start the `description` of the `Agent` call with `Codex Agent` or `Gemini Agent`, then the task in a few words, such as `Codex Agent: review token refresh`. If the user named a model, put it in: `Gemini Agent (gemini-3.8-flash-low): explain math.js`. It is what the user sees while the delegate works.
 
 Worktree:
 

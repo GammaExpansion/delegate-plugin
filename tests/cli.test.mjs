@@ -21,6 +21,8 @@ fs.mkdirSync(workspace, { recursive: true });
 const finished = (id, extra = {}) => ({
   id,
   backend: "codex",
+  agentName: "Codex Agent",
+  model: "gpt-test",
   cwd: workspace,
   prompt: "a task",
   permissionMode: "default",
@@ -98,7 +100,9 @@ test("follow returns at once with a request the caller has not seen", () => {
   const shown = companion(["follow", "task-wait1", "--offset", "0"], { cwd: workspace });
   assert.ok(Date.now() - started < 5000, "it should not wait for the settle window");
   assert.match(shown.stdout, /state=waiting-for-approval/);
-  assert.match(shown.stdout, /=== APPROVAL NEEDED ===\nrequest: req-1\ncodex asks to run a command\n  touch \/somewhere\/else\.txt/);
+  assert.match(shown.stdout, /=== APPROVAL NEEDED ===\nrequest: req-1\nCodex Agent \(gpt-test\) asks to run a command\n  touch \/somewhere\/else\.txt/);
+  // The trailer names the agent and its model, for the caller's progress notes.
+  assert.match(shown.stdout, /next-offset=\d+ agent="Codex Agent \(gpt-test\)"/);
   assert.match(shown.stdout, /answer task-wait1 req-1 allow/);
 });
 

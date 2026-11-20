@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 const COMPANION = fileURLToPath(new URL("../plugins/delegate/scripts/companion.mjs", import.meta.url));
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "delegate-test-")));
 process.env.DELEGATE_STATE_DIR = path.join(scratch, "data");
-const { appendLog, writeJob, getJob, stateDir } = await import("../plugins/delegate/scripts/lib/state.mjs");
+const { appendLog, writeJob, getJob, stateDir, pruneJobs, listJobs } = await import("../plugins/delegate/scripts/lib/state.mjs");
 const { addUsage } = await import("../plugins/delegate/scripts/lib/backends/shared.mjs");
 const { takeLeadingOptions } = await import("../plugins/delegate/scripts/lib/args.mjs");
 const { agyBackend } = await import("../plugins/delegate/scripts/lib/backends/agy.mjs");
@@ -244,6 +244,78 @@ test("a message handed over in a file is read and removed, and the answer comes 
   // The same answer again later, as `wait` gives it: still only the path.
   assert.deepEqual(wait(id).stdout.trimEnd().split("\n").slice(1), lines.slice(1));
   assert.match(runFor("normal")(["--message-file", message]).stderr, /Could not read the message file .*ENOENT/);
+});
+
+test("a request that is refused leaves its message file in place, so it can be sent again", () => {
+  const exchange = path.join(scratch, "exchange-retry");
+  fs.mkdirSync(exchange);
+  const message = path.join(exchange, "delegate-retry001.txt");
+  fs.writeFileSync(message, "--permission nonsense\nDo it.\n");
+  const refused = runFor("normal")(["--message-file", message]);
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /no permission option "nonsense"/);
+  assert.ok(fs.existsSync(message), "nothing was started, so nothing was consumed");
+  fs.writeFileSync(message, "--permission read-only\nDo it.\n");
+  assert.equal(runFor("normal")(["--message-file", message]).status, 0);
+  assert.ok(!fs.existsSync(message));
+
+  // Only a scratch copy is ever removed: a file with any other name is refused outright.
+  const own = path.join(exchange, "notes.md");
+  fs.writeFileSync(own, "Mine.\n");
+  const wrong = runFor("normal")(["--message-file", own]);
+  assert.equal(wrong.status, 2);
+  assert.match(wrong.stderr, /--message-file takes a scratch file named delegate-/);
+  assert.equal(fs.readFileSync(own, "utf8"), "Mine.\n");
+  fs.writeFileSync(path.join(exchange, "delegate-empty001.txt"), "  \n");
+  assert.match(runFor("normal")(["--message-file", path.join(exchange, "delegate-empty001.txt")]).stderr, /is empty/);
+});
+
+test("an answer file that has gone missing is written again, and one that cannot be written is said so", () => {
+  const exchange = path.join(scratch, "exchange-lost");
+  fs.mkdirSync(exchange);
+  const message = path.join(exchange, "delegate-lost0001.txt");
+  fs.writeFileSync(message, "Do it.\n");
+  const first = runFor("normal")(["--message-file", message]);
+  const id = first.stdout.match(/task-\w+/)[0];
+  const answer = path.join(exchange, `${id}.md`);
+  // The scratchpad is cleared: the record still has the text, so the file comes back.
+  fs.rmSync(exchange, { recursive: true });
+  assert.match(wait(id).stdout, new RegExp(`^answer: ${answer.replace(/[.]/g, "\\.")}$`, "m"));
+  assert.equal(fs.readFileSync(answer, "utf8"), "all done\n");
+  // Now it cannot be written at all (a file stands where the directory should be).
+  fs.rmSync(exchange, { recursive: true });
+  fs.writeFileSync(exchange, "in the way");
+  const lost = wait(id).stdout.trimEnd().split("\n");
+  assert.match(lost.at(-2), /^answer: not saved \(could not write .*: (ENOTDIR|EEXIST)\)\.$/);
+  assert.equal(lost.at(-1), `Print it with: node "${COMPANION}" result ${id}`);
+  assert.ok(!lost.includes("all done"), "the answer is not pushed through the caller instead");
+  assert.match(companion(["result", id], { cwd: workspace }).stdout, /all done/);
+});
+
+test("pruning goes by when a job finished, and removes only an answer file of its own", () => {
+  const ws = path.join(scratch, "prune-ws");
+  const out = path.join(scratch, "prune-out");
+  fs.mkdirSync(ws);
+  fs.mkdirSync(out);
+  const at = (minutes) => new Date(Date.UTC(2026, 0, 1, 0, minutes)).toISOString();
+  const job = (id, createdMin, finishedMin, extra = {}) =>
+    writeJob(ws, { ...finished(id), cwd: ws, createdAt: at(createdMin), startedAt: at(createdMin), finishedAt: at(finishedMin), ...extra });
+  // A long job: started first, finished last. Fifty short ones started after it.
+  fs.writeFileSync(path.join(out, "task-long.md"), "the long answer\n");
+  job("task-long", 0, 500, { exchangeDir: out, answerFile: path.join(out, "task-long.md") });
+  for (let n = 1; n <= 50; n += 1) job(`task-short${String(n).padStart(2, "0")}`, n, n + 1);
+  // The one that finished first names a file that is not its own.
+  const bystander = path.join(out, "keep-me.txt");
+  fs.writeFileSync(bystander, "not an answer\n");
+  job("task-short01", 1, 2, { exchangeDir: out, answerFile: bystander });
+
+  pruneJobs(ws);
+  const left = listJobs(ws).map((entry) => entry.id);
+  assert.equal(left.length, 50);
+  assert.ok(left.includes("task-long"), "the job that has only just finished is kept");
+  assert.ok(!left.includes("task-short01"), "the one that finished longest ago goes");
+  assert.ok(fs.existsSync(path.join(out, "task-long.md")));
+  assert.ok(fs.existsSync(bystander), "a path that is not the job's own answer file is left alone");
 });
 
 test("a brief kept in a file is named at the top of the request and put before the rest of it", () => {

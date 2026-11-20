@@ -74,6 +74,7 @@ function isInside(root, target) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 const FINISHED = new Set(["completed", "failed"]);
+const FLUSH_INTERVAL_MS = 4000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // agy runs a command that takes a while in the background: it ends its turn with the
@@ -81,18 +82,24 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // new prompt. So a turn that ends with a tool call still open is not over. It is over
 // when nothing is open any more and agy has taken the model step that follows a
 // command's end (which closes with a usage update) without starting anything new.
+const OPEN = new Set(["pending", "in_progress"]);
 const BACKGROUND_TICK_MS = 500;
 // After that closing step, how long to listen for anything that still trickles in.
 const BACKGROUND_SETTLE_MS = 3000;
-// If no such step comes this long after the last command ended, agy is not carrying on.
+// How long to wait for that step once the last command has ended.
 const BACKGROUND_WAKE_MS = 90_000;
+// The same, for a command that ended so close to the end of the turn that it cannot be
+// told whether agy had taken its result in. Usually it had, so this wait is short.
+const LATE_CLOSE_WAKE_MS = 20_000;
 
-/** How long a background command may run without a sign of life before the turn is ended anyway. */
-function backgroundSilenceMs() {
-  const seconds = Number(process.env.DELEGATE_AGY_BACKGROUND_WAIT_SEC);
-  return (Number.isFinite(seconds) && seconds > 0 ? seconds : 30 * 60) * 1000;
-}
-const FLUSH_INTERVAL_MS = 4000;
+const secondsFromEnv = (name, fallback) => {
+  const seconds = Number(process.env[name]);
+  return (Number.isFinite(seconds) && seconds > 0 ? seconds : fallback) * 1000;
+};
+/** How long a background command may run without a sign of life from agy. */
+const backgroundSilenceMs = () => secondsFromEnv("DELEGATE_AGY_BACKGROUND_WAIT_SEC", 30 * 60);
+/** How long background work may go on in all after a turn has ended, however lively. */
+const backgroundLimitMs = () => secondsFromEnv("DELEGATE_AGY_BACKGROUND_MAX_SEC", 2 * 60 * 60);
 
 /** Text a finished tool call reported, if any (ACP puts it in `content`). */
 function toolOutputText(update) {
@@ -290,8 +297,13 @@ export const agyBackend = {
             messageBroken = true;
             onEvent({ type: "progress", text: `starting ${action.kind}: ${oneLine(action.title)}` });
           }
-          if (FINISHED.has(action.status) && previous.status !== action.status) {
+          // A call that has just stopped being open, however it ended: agy has a model
+          // step to take on its result, and what it says next is a new stretch of text.
+          if (action.status && !OPEN.has(action.status) && action.status !== previous.status && (OPEN.has(previous.status) || !known)) {
             stepEndedSinceLastClose = false;
+            messageBroken = true;
+          }
+          if (FINISHED.has(action.status) && previous.status !== action.status) {
             onEvent({ type: "action", action, output: clipTail(toolOutputText(update)) });
           }
           return;
@@ -394,29 +406,54 @@ export const agyBackend = {
       });
       let stopWaiting = false;
       gaveUp.then(() => (stopWaiting = true));
-      client.failure.catch(() => (stopWaiting = true));
-      const openTools = () => actionsList().filter((action) => action.status === "in_progress" || action.status === "pending");
+      let failure = null;
+      client.failure.catch((error) => (failure = error));
+      // A call that was declined is not running, whatever status agy leaves it in.
+      const openTools = () => actionsList().filter((action) => OPEN.has(action.status) && action.permission !== "denied");
+      const named = (actions) => actions.map((action) => oneLine(action.title, 80)).join("; ");
 
-      // Wait out the work agy carries on with after ending its turn (see BACKGROUND_TICK_MS).
+      /**
+       * Wait out the work agy carries on with after ending its turn (see OPEN above).
+       * Returns null when that work is over, or what went wrong with it.
+       */
       const settleBackground = async () => {
-        if (!openTools().length) return;
-        onEvent({ type: "note", text: "agy ended its turn with a command still running; waiting for it to carry on" });
+        // A command can also end just before the turn does, with agy's step on its result
+        // still to come. Not after a refusal, though: there agy has simply stopped.
+        const lateClose = !stepEndedSinceLastClose && !unanswered.length;
+        if (!openTools().length && !lateClose) return null;
+        if (openTools().length) {
+          onEvent({ type: "note", text: "agy ended its turn with a command still running; waiting for it to carry on" });
+        }
+        const startedAt = Date.now();
         const silenceMs = backgroundSilenceMs();
+        const limitMs = backgroundLimitMs();
+        let wakeMs = openTools().length ? BACKGROUND_WAKE_MS : LATE_CLOSE_WAKE_MS;
         while (!cancelled && !stopWaiting) {
+          if (failure) return `agy stopped while it was still at work after ending its turn. ${failure.message}`;
           await sleep(BACKGROUND_TICK_MS);
-          const quietMs = Date.now() - lastActivityAt;
+          const now = Date.now();
+          const quietMs = now - lastActivityAt;
           const open = openTools();
           if (open.length) {
-            if (quietMs < silenceMs) continue;
-            onEvent({
-              type: "note",
-              text: `still running after ${Math.round(silenceMs / 1000)}s without a sign of life, and stopped with the job: ${open.map((action) => oneLine(action.title, 80)).join("; ")}`
-            });
-            return;
+            wakeMs = BACKGROUND_WAKE_MS;
+            if (quietMs >= silenceMs) {
+              return `agy left a command running and gave no sign of life for ${Math.round(silenceMs / 1000)}s, so the job stopped waiting: ${named(open)}`;
+            }
+            if (now - startedAt >= limitMs) {
+              return `agy was still running a command ${Math.round(limitMs / 1000)}s after its turn ended, so the job stopped waiting: ${named(open)}`;
+            }
+            continue;
           }
-          if (stepEndedSinceLastClose ? quietMs >= BACKGROUND_SETTLE_MS : quietMs >= BACKGROUND_WAKE_MS) return;
+          if (stepEndedSinceLastClose) {
+            if (quietMs >= BACKGROUND_SETTLE_MS) return null;
+          } else if (quietMs >= wakeMs) {
+            if (!lateClose) onEvent({ type: "note", text: "agy said nothing more after its command ended" });
+            return null;
+          }
         }
+        return null;
       };
+      let backgroundError = null;
 
       // agy reports token counts per message, so a job that sends several adds them up.
       // What it spends on steps it takes after ending its turn is not in any of them.
@@ -428,12 +465,12 @@ export const agyBackend = {
           gaveUp
         ]);
         usage = addUsage(usage, toUsage(outcome?.usage));
-        if (outcome?.stopReason === "end_turn") await settleBackground();
+        if (outcome?.stopReason === "end_turn") backgroundError ??= await settleBackground();
         return outcome;
       };
 
       let result = await send(prompt);
-      for (let nudges = 0; nudges < MAX_NUDGES && unanswered.length && !cancelled && result?.stopReason === "end_turn"; nudges += 1) {
+      for (let nudges = 0; nudges < MAX_NUDGES && unanswered.length && !cancelled && !backgroundError && result?.stopReason === "end_turn"; nudges += 1) {
         onEvent({ type: "note", text: "agy stopped at a declined request without answering; asking it to finish without" });
         messageBroken = true;
         result = await send(nudgeAfterDeclines(unanswered.splice(0)));
@@ -447,6 +484,10 @@ export const agyBackend = {
       } else if (stop !== "end_turn") {
         status = "failed";
         error = `agy stopped early (stopReason: ${stop ?? "unknown"}).`;
+      } else if (backgroundError) {
+        // What agy had said up to then is kept as the answer, under the error.
+        status = "failed";
+        error = backgroundError;
       }
 
       return { status, sessionId, model: usedModel, text: text.trim(), actions: actionsList(), usage, error };

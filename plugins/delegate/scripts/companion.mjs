@@ -13,6 +13,7 @@ import { DEFAULT_MAX_WAIT_SEC, settleWindowMs } from "./lib/pacing.mjs";
 import { statusLine } from "./lib/progress.mjs";
 import { renderAnswer, renderJobDetail, renderModels, renderResult, renderRunning, renderSetup, renderStatusList } from "./lib/render.mjs";
 import {
+  answerFileOf,
   appendLog,
   finishJob,
   getJob,
@@ -62,15 +63,32 @@ function readTextFile(file, what) {
  * Returns null when there is no such place or no answer, and the answer is then printed.
  */
 function saveAnswer(job, text) {
-  if (!job.exchangeDir || !String(text ?? "").trim()) return null;
-  const file = path.join(job.exchangeDir, `${job.id}.md`);
+  const file = answerFileOf(job);
+  if (!file || !String(text ?? "").trim()) return { answerFile: null, answerError: null };
   try {
+    fs.mkdirSync(job.exchangeDir, { recursive: true });
     fs.writeFileSync(file, `${text.trimEnd()}\n`, "utf8");
-    return file;
-  } catch {
-    return null;
+    return { answerFile: file, answerError: null };
+  } catch (error) {
+    return { answerFile: null, answerError: `could not write ${file}: ${error.code ?? error.message}` };
   }
 }
+
+/**
+ * Make sure a finished job's answer file is there before its path is handed out: the
+ * scratchpad it was saved in may have been cleared since. The record still holds the
+ * text, so the file is written again. Returns the job as it should be shown.
+ */
+function withAnswerFile(cwd, job) {
+  if (isActive(job) || !job.exchangeDir || (job.answerFile && fs.existsSync(job.answerFile))) return job;
+  const saved = saveAnswer(job, job.result?.text);
+  if (saved.answerFile === (job.answerFile ?? null) && saved.answerError === (job.answerError ?? null)) return job;
+  return updateJob(cwd, job.id, saved) ?? { ...job, ...saved };
+}
+
+// The file a forwarding subagent saves a message in. Only a file with such a name is
+// treated as a scratch copy, which is removed once read.
+const MESSAGE_FILE_NAME = /^delegate-[A-Za-z0-9_-]+\.txt$/;
 
 function leaseSeconds() {
   const raw = process.env.DELEGATE_LEASE_SEC;
@@ -261,7 +279,7 @@ async function runJob(cwd, id) {
       ...latest,
       sessionId: result.sessionId ?? latest.sessionId ?? null,
       model: result.model ?? latest.model ?? null,
-      answerFile: saveAnswer(latest, result.text)
+      ...saveAnswer(latest, result.text)
     },
     result.status,
     { text: result.text, actions: result.actions, usage: result.usage, error: result.error }
@@ -288,16 +306,22 @@ async function cmdRun(argv) {
   const cwd = path.resolve(given.cwd ?? process.cwd());
 
   let text = positionals.join(" ").trim();
-  let exchangeDir = null;
+  let messageFile = null;
   if (given["message-file"]) {
-    const file = path.resolve(cwd, given["message-file"]);
-    text = readTextFile(file, "the message file");
-    exchangeDir = path.dirname(file);
-    fs.rmSync(file, { force: true });
+    messageFile = path.resolve(cwd, given["message-file"]);
+    if (!MESSAGE_FILE_NAME.test(path.basename(messageFile))) {
+      throw new Error(
+        "--message-file takes a scratch file named delegate-<letters and digits>.txt, which is removed once read. For a file of your own, use --prompt-file."
+      );
+    }
+    text = readTextFile(messageFile, "the message file");
+    if (!text) throw new Error(`The message file ${messageFile} is empty.`);
   } else if (given["prompt-file"]) {
     text = readTextFile(path.resolve(cwd, given["prompt-file"]), "the prompt file");
+  } else if (!text) {
+    text = (await readStdin()).trim();
   }
-  if (!text) text = (await readStdin()).trim();
+  const exchangeDir = messageFile ? path.dirname(messageFile) : null;
   const { options: written, body } = takeLeadingOptions(text, REQUEST_OPTIONS);
   const options = { ...given, ...written };
   // A long brief, or one full of code, can be kept in a file and named at the top of the
@@ -365,6 +389,9 @@ async function cmdRun(argv) {
     result: null
   });
   pruneJobs(cwd, jobs);
+  // The message is on record now. Until here a refused request leaves the file in place,
+  // so that the same command can be sent again.
+  if (messageFile) fs.rmSync(messageFile, { force: true });
 
   // Every task runs as a detached worker, so that it outlives this command: a call from
   // Claude Code may last a few minutes at most, and a task may take far longer.
@@ -472,7 +499,7 @@ async function reportNews(cwd, job, { maxWaitMs, settleSec }) {
   touchHeartbeat(cwd, job.id);
 
   if (!isActive(job)) {
-    console.log(renderAnswer(job));
+    console.log(renderAnswer(withAnswerFile(cwd, job), `node "${SCRIPT_PATH}" result ${job.id}`));
     return 0;
   }
   const { text, nextOffset } = readLogFrom(cwd, job.id, offset);
@@ -529,8 +556,14 @@ async function cmdCancel(argv) {
     }
   }
 
-  finishJob(cwd, readJob(cwd, job.id) ?? job, "cancelled", {
-    ...(job.result ?? {}),
+  // The job may have recorded its own outcome in the meantime. That record stands.
+  const latest = readJob(cwd, job.id) ?? job;
+  if (!isActive(latest)) {
+    console.log(`Job ${job.id} finished by itself (${latest.status}).`);
+    return 0;
+  }
+  finishJob(cwd, latest, "cancelled", {
+    ...(latest.result ?? {}),
     error: "Cancelled; the job's process had to be force-stopped."
   });
   console.log(`Cancelled ${job.id} (force-stopped).`);

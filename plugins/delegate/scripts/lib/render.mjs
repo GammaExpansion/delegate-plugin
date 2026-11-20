@@ -72,7 +72,7 @@ const declinedNote = (job) =>
  * The session id is on every result, so that whoever continues the conversation finds
  * it in the latest one and never has to look further back.
  */
-export function renderAnswer(job) {
+export function renderAnswer(job, resultCommand = `result ${job.id}`) {
   const result = job.result ?? {};
   const lines = [[`[delegate] ${agentOf(job)}`, job.status, formatDuration(jobDurationMs(job)), permissionOf(job), job.id].join(" · ")];
   if (job.sessionId) lines.push(`session: ${job.sessionId}`);
@@ -90,6 +90,10 @@ export function renderAnswer(job) {
     // this on. All they pass on is where it is.
     const words = String(result.text ?? "").split(/\s+/).filter(Boolean).length;
     lines.push(`answer: ${job.answerFile}`, `The answer (${words.toLocaleString("en-US")} words) is in that file and is not repeated here. Read the file.`);
+  } else if (job.exchangeDir && result.text) {
+    // It was meant to go to a file and could not. Printing it here would send it through
+    // the very hands the file was to spare, so the reader is told how to fetch it.
+    lines.push(`answer: not saved (${job.answerError ?? "the file could not be written"}).`, `Print it with: ${resultCommand}`);
   } else {
     lines.push("", result.text ? result.text : "(no message)");
   }

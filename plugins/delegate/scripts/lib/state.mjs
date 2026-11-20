@@ -329,13 +329,24 @@ export function locateJob(id) {
   return null;
 }
 
-/** Keep the newest MAX_JOBS finished jobs; never remove an active one. */
+/** Where a job's answer is saved for a caller that handed its message over in a file. */
+export function answerFileOf(job) {
+  return job.exchangeDir ? path.join(job.exchangeDir, `${job.id}.md`) : null;
+}
+
+/**
+ * Keep the MAX_JOBS jobs that finished last; never remove an active one. Going by when a
+ * job finished, not when it started, keeps a long job that has only just ended, whose
+ * answer may not have been read yet, however many shorter ones started after it.
+ */
 export function pruneJobs(cwd, jobs = listJobs(cwd)) {
-  const finished = jobs.filter((job) => !isActive(job));
+  const endedAt = (job) => Date.parse(job.finishedAt ?? job.createdAt) || 0;
+  const finished = jobs.filter((job) => !isActive(job)).sort((a, b) => endedAt(b) - endedAt(a));
   for (const job of finished.slice(MAX_JOBS)) {
     const files = [jobFile, logFile, heartbeatFile, cursorFile].map((fileOf) => fileOf(cwd, job.id));
-    // The answer saved for the job's caller goes with the record, if it is still there.
-    if (job.answerFile) files.push(job.answerFile);
+    // The answer saved for the job's caller goes with the record. Only the file this
+    // plugin would itself have written there is removed, whatever the record names.
+    if (job.answerFile && job.answerFile === answerFileOf(job)) files.push(job.answerFile);
     for (const file of files) {
       try {
         fs.rmSync(file, { force: true });

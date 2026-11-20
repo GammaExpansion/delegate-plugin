@@ -158,13 +158,13 @@ What to know before using it:
 
 Every task runs the same way:
 
-1. The subagent saves the request to a file in its scratchpad directory and calls `run --message-file <that file>`. `run` reads the options from the top of the request, removes the file, starts the delegate as a detached job, and waits for its first news.
+1. The subagent saves the request to a file named `delegate-<random>.txt` in its scratchpad directory and calls `run --message-file <that file>`. `run` reads the options from the top of the request, removes the file, starts the delegate as a detached job, and waits for its first news.
 2. While the job is not over, the output is three lines: `[delegate] still running`, one line on what the delegate did last, and the `wait` command to run next. The subagent runs that command, with that line as the description of the call, which is what you see while the delegate works.
 3. When the job has ended, the delegate's answer is saved as `<job>.md` in the same scratchpad directory. The output is a few lines: the agent, the model, the outcome, the permission option and the job, the session id, anything that was declined, and the path of that file. The subagent returns those lines unchanged, and Claude reads the file.
 
 The subagent's model decides nothing along the way, and nothing long passes through it. It does not keep an offset, judge whether the job has finished, summarise progress, or retype the answer. It writes the request to a file once, copies a command and a line of text, and at the end returns a few lines it was given.
 
-The request file is removed as soon as it has been read. An answer file stays in the scratchpad until its job's record is pruned (the newest 50 finished jobs of a repository are kept) or Claude Code clears the scratchpad, whichever comes first.
+The request file is removed once the job is on record. A request that is refused (a misspelt option, a conversation that is busy) leaves it in place, so the same command can be sent again. An answer file stays in the scratchpad until its job's record is pruned (the 50 jobs of a repository that finished last are kept) or Claude Code clears the scratchpad. If the file is gone when the answer is asked for again, it is written again from the job's record.
 
 The full record of a job, with every action and the token counts, is one command away: `/delegate:result <job-id>`.
 
@@ -360,7 +360,7 @@ Job records live in the system temp directory, under `delegate-plugin/`, in one 
 node --test
 ```
 
-The tests in `tests/` cover the command line, against job records written to a temporary directory, and the Codex backend, against a stand-in for `codex app-server`. They need neither CLI. The behaviour of the real backends was checked by hand, by running real tasks.
+The tests in `tests/` cover the command line, against job records written to a temporary directory, and both backends, against stand-ins for `codex app-server` and `agy acp`. They need neither CLI. The behaviour of the real backends was checked by hand, by running real tasks.
 
 ## Adding a backend
 
@@ -383,7 +383,7 @@ Then add `agents/<name>.md` so Claude can call it as a subagent.
 - A delegate cannot be approved mid-turn. What needs approval is declined, and letting it through takes another turn with a higher option.
 - Messages and answers are exchanged as files in the session's scratchpad directory, which exists only inside Claude Code. A task started by hand prints its answer.
 - An answer reaches Claude only when Claude reads its file. A result that is passed on unread says nothing but where the answer is.
-- agy runs a slow command in the background and ends its turn before the command has finished. The job waits for it to carry on, and gives up on a command that shows no sign of life for 30 minutes (`DELEGATE_AGY_BACKGROUND_WAIT_SEC`), so a server that agy leaves running holds the job open that long.
+- agy runs a slow command in the background and ends its turn before the command has finished. The job waits for it to carry on. It gives up, and the job fails with what agy had said so far, when the command shows no sign of life for 30 minutes (`DELEGATE_AGY_BACKGROUND_WAIT_SEC`) or is still running two hours after the turn ended (`DELEGATE_AGY_BACKGROUND_MAX_SEC`). A server that agy leaves running holds the job open that long.
 - Below `full-access`, Codex cannot commit inside a worktree, because its sandbox does not include the main repository's `.git` directory.
 - After its subagent is interrupted, a delegate keeps running for up to two minutes before the lease stops it. Use `/delegate:cancel` to stop it at once.
 - Job records live in the system temp directory, which the system clears from time to time.

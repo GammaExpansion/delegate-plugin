@@ -33,6 +33,6 @@ If the user does not want to wait for the answer, run the subagent in the backgr
 
 Afterwards:
 
-- Show the subagent's output to the user as it came back.
+- The subagent's output is a few lines, one of which names the file the delegate's answer was saved in (`answer: <path>`). Read that file and show the answer to the user as it is, under the first line of the subagent's output.
 - Stop there. Do not apply the delegate's suggestions or continue its work unless the user asks.
 - If the output says a backend is missing or not logged in, point the user to `/delegate:setup`.

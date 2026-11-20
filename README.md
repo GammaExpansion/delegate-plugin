@@ -11,27 +11,88 @@ The plugin stores no credentials. It uses the login and configuration that each 
 
 ## Install
 
-Requires Node.js 18.18 or later and at least one backend CLI that is installed and logged in.
+### What you need
 
-Load it directly during development:
+- Claude Code.
+- Node.js 18.18 or later.
+- At least one of the two agent CLIs, installed and signed in. You only need the ones you plan to use.
 
-```bash
-claude --plugin-dir /path/to/delegate-plugin/plugins/delegate
-```
+| Backend | Install | Sign in |
+|---|---|---|
+| Codex | `npm install -g @openai/codex` | `codex login` |
+| Antigravity | Install the Antigravity CLI so that `agy` is on your `PATH` | Run `agy` once and sign in |
 
-Or install it as a marketplace, from GitHub or from a local copy:
+### Install the plugin
+
+In Claude Code, run these two commands:
 
 ```text
 /plugin marketplace add GammaExpansion/delegate-plugin
 /plugin install delegate@delegate-marketplace
 ```
 
-```text
-/plugin marketplace add /path/to/delegate-plugin
-/plugin install delegate@delegate-marketplace
+Or from a terminal:
+
+```bash
+claude plugin marketplace add GammaExpansion/delegate-plugin
 ```
 
-Then run `/delegate:setup` to check that the backends are ready.
+```bash
+claude plugin install delegate@delegate-marketplace
+```
+
+Then start a new Claude Code session, so that the plugin is loaded.
+
+### Check that it works
+
+```text
+/delegate:setup
+```
+
+It lists each backend with its state. A backend you can use says `ready`:
+
+```text
+node: 22.19.0 (ok)
+codex: ready · codex-cli 0.170.0
+agy: ready · 1.5.12
+```
+
+For one that does not, the line under it says what to do. Then try a first task:
+
+```text
+Ask Codex what this repository does, in three sentences
+```
+
+### What it adds
+
+- Two subagents, `delegate:codex` and `delegate:agy`, which Claude picks when you ask for Codex or Antigravity.
+- Six commands: `/delegate:run`, `/delegate:status`, `/delegate:result`, `/delegate:cancel`, `/delegate:models` and `/delegate:setup`.
+- One skill, which tells Claude when to delegate and how to brief a delegate.
+- One hook, which runs before every Bash call of a session. It acts only on this plugin's own commands and lets everything else through. Keep it enabled: it is what passes your permission mode to a delegate, and what puts a delegate's permission requests to you. See [Permission model](#permission-model).
+
+### Update or remove
+
+```bash
+claude plugin marketplace update delegate-marketplace
+```
+
+```bash
+claude plugin update delegate@delegate-marketplace
+```
+
+```bash
+claude plugin uninstall delegate@delegate-marketplace
+```
+
+### Work on the plugin itself
+
+Clone the repository and load the plugin from your copy, without installing it:
+
+```bash
+claude --plugin-dir /path/to/delegate-plugin/plugins/delegate
+```
+
+Run the tests from the repository root with `node --test`. See [Tests](#tests).
 
 ## Usage
 

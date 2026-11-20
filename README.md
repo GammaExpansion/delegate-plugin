@@ -161,7 +161,7 @@ The delegate is shown as `Codex Agent` or `Gemini Agent`, with the model it is r
 
 Codex can start agents of its own. What they do appears in the progress under their names (`subagent explorer: ...`), and is not part of the answer.
 
-`follow` returns when there is something to report, not on a timer. Once the delegate logs new activity, `follow` keeps collecting for a short settle window (6 seconds in a job's first minute, 15 up to five minutes, 30 after that) and returns that batch. If the delegate is silent it returns after 90 seconds. Progress therefore arrives in batches, not token by token.
+`follow` returns when there is something to report, not on a timer. Once the delegate logs new activity, `follow` keeps collecting for a short settle window (6 seconds in a job's first minute, 15 up to five minutes, 60 after that) and returns that batch. If the delegate is silent it returns after 90 seconds. Progress therefore arrives in batches, not token by token.
 
 The forwarding subagent keeps everything it reads in its context, and that context lasts for the whole conversation. So `follow` shows a compact view by default: reasoning entries are left out, only the last two lines of a command's output are kept, and interim messages are cut short. The full log stays on disk.
 
@@ -177,7 +177,7 @@ There is no background mode and no blocking `wait` command. Both existed in an e
 
 - **What it replaced.** The subagent used to run the delegate inside one blocking shell command. That command was bound by Claude Code's 10-minute limit, and nothing the delegate did was visible until it ended. Long tasks needed a second path: `--background` to detach the job, and `wait` to find out when it had finished.
 - **Why one path is enough.** Following the job in short calls has no time limit and shows progress, which covers what the second path was for. Not blocking the main conversation is something Claude Code already does for any subagent, so the plugin does not need its own mechanism.
-- **What it costs.** Each `follow` call is one call to the subagent's model, and the subagent's context grows with what it reads. A blocking `wait` used no model calls while the job ran. One path that always shows progress was judged worth more than a cheaper second path that has to be explained and chosen.
+- **What it costs.** Each `follow` call is one call to the subagent's model, and the subagent's context grows with what it reads. A blocking `wait` used no model calls while the job ran. One path that always shows progress was judged worth more than a cheaper second path that has to be explained and chosen. Measured on a Sonnet subagent, a task costs a fixed few cents to start and under a cent for each batch of progress after that. Three things keep it there: the subagent reports progress in one place only, batches get further apart as a job gets older, and the subagent's instructions are kept short.
 
 ### A conversation is a subagent
 
@@ -305,6 +305,7 @@ plugins/delegate/
     └── lib/
         ├── hook.mjs       what the hook decides about a command
         ├── abort.mjs      the grace period after a cancel
+        ├── pacing.mjs     how often `follow` hands back a batch of progress
         ├── permission.mjs the permission modes, and which one a turn runs in
         ├── rpc.mjs        JSON-RPC client over a child process's stdio, shared by both backends
         ├── state.mjs      job records (one JSON file per job)

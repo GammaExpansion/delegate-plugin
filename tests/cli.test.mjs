@@ -267,6 +267,12 @@ test("the models listing groups ids, folds thinking levels and marks the default
   assert.match(shown, /Other Agent \(--backend other\)\n  could not list its models: not installed/);
 });
 
+test("progress batches get further apart as a job gets older", async () => {
+  const { settleWindowMs } = await import("../plugins/delegate/scripts/lib/pacing.mjs");
+  const seconds = (ageSec) => settleWindowMs(ageSec * 1000) / 1000;
+  assert.deepEqual([0, 59, 60, 299, 300, 3600].map(seconds), [6, 6, 15, 15, 60, 60]);
+});
+
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 
 test("the cancel grace period starts even when the abort came first", async (t) => {

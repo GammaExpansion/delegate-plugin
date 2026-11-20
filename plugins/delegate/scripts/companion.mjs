@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { CONVERSATION_MODE_FLAG, TOKEN_FLAG, parseArgs } from "./lib/args.mjs";
 import { BACKENDS, getBackend } from "./lib/backends/index.mjs";
+import { DEFAULT_MAX_WAIT_SEC, settleWindowMs } from "./lib/pacing.mjs";
 import { FALLBACK_MODE, MODES, resolvePermissionMode } from "./lib/permission.mjs";
 import {
   renderJobDetail,
@@ -513,17 +514,11 @@ async function cmdFollow(argv) {
   };
   const offset = nonNegative("offset", 0);
   if (!Number.isInteger(offset)) throw new Error("--offset must be a whole number.");
-  const maxWaitMs = nonNegative("max-wait-sec", 90) * 1000;
+  const maxWaitMs = nonNegative("max-wait-sec", DEFAULT_MAX_WAIT_SEC) * 1000;
   const settleOverride = nonNegative("settle-sec", null);
 
-  // The settle window grows with the job's age: frequent updates early, fewer on long runs.
-  const settleMs = () => {
-    if (settleOverride !== null) return settleOverride * 1000;
-    const ageMs = Date.now() - Date.parse(job.startedAt ?? job.createdAt);
-    if (ageMs < 60_000) return 6_000;
-    if (ageMs < 300_000) return 15_000;
-    return 30_000;
-  };
+  const settleMs = () =>
+    settleOverride !== null ? settleOverride * 1000 : settleWindowMs(Date.now() - Date.parse(job.startedAt ?? job.createdAt));
 
   const startedAt = Date.now();
   let lastBeat = 0;

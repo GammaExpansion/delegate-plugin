@@ -82,6 +82,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // new prompt. So a turn that ends with a tool call still open is not over. It is over
 // when nothing is open any more and agy has taken the model step that follows a
 // command's end (which closes with a usage update) without starting anything new.
+//
+// A command agy started to keep running (a server, an emulator) is another matter: it
+// never ends, and agy is not waiting for it. agy's terminal tool marks such a call with
+// `IsDaemon` in its input, and a call so marked is not waited for.
 const OPEN = new Set(["pending", "in_progress"]);
 const BACKGROUND_TICK_MS = 500;
 // After that closing step, how long to listen for anything that still trickles in.
@@ -91,6 +95,16 @@ const BACKGROUND_WAKE_MS = 90_000;
 // The same, for a command that ended so close to the end of the turn that it cannot be
 // told whether agy had taken its result in. Usually it had, so this wait is short.
 const LATE_CLOSE_WAKE_MS = 20_000;
+
+// A resumed session replays its history as updates, and agy answers `session/load` while
+// a long history is still on its way. It marks neither the replayed updates nor their
+// end, so the history is taken to be over once no update has come for this long (they
+// come less than 10 ms apart). The prompt waits for that: agy drops a prompt that
+// reaches it during the replay, and reports a finished turn.
+const REPLAY_QUIET_MS = 1000;
+// At most this long in all, for a history that never goes quiet.
+const REPLAY_MAX_MS = 30_000;
+const REPLAY_TICK_MS = 50;
 
 const secondsFromEnv = (name, fallback) => {
   const seconds = Number(process.env[name]);
@@ -205,13 +219,14 @@ export const agyBackend = {
    * @param {import("./index.mjs").RunOptions} options
    * @returns {Promise<import("./index.mjs").RunResult>}
    */
-  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, onEvent }) {
+  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent }) {
     const { permission: permissionName, settings: policy } = settingsFor({ permission, sandbox });
     const client = new StdioRpcClient({
       command: "agy",
       args: ["acp", ...policy.args],
       cwd,
-      includeJsonRpcField: true
+      includeJsonRpcField: true,
+      traceFile
     }).start();
     const tools = new Map();
     let text = "";
@@ -243,15 +258,17 @@ export const agyBackend = {
     }, FLUSH_INTERVAL_MS);
     flushTimer.unref();
 
-    // For telling when work that agy carries on in the background is over (see settleBackground).
+    // When agy last sent an update: for telling when a replayed history has ended, and
+    // when work that agy carries on in the background is over (see settleBackground).
     let lastActivityAt = Date.now();
     let stepEndedSinceLastClose = true;
 
     client.onNotification = (method, params) => {
-      // `session/load` replays the whole history as updates before it returns; skip those.
-      if (method !== "session/update" || replaying) return;
-      const update = params?.update ?? {};
+      if (method !== "session/update") return;
       lastActivityAt = Date.now();
+      // History of a resumed session (see REPLAY_QUIET_MS): none of it is this turn's.
+      if (replaying) return;
+      const update = params?.update ?? {};
       switch (update.sessionUpdate) {
         case "usage_update":
           // agy reports usage at the end of each model step.
@@ -290,6 +307,7 @@ export const agyBackend = {
             title: update.title ?? update.name ?? previous.title ?? "tool call",
             status: update.status ?? previous.status
           };
+          if (update.rawInput?.IsDaemon === true) action.daemon = true;
           tools.set(update.toolCallId, action);
           if (!known) {
             flush("thinking");
@@ -362,12 +380,10 @@ export const agyBackend = {
 
       let opened;
       if (resumeSessionId) {
+        // Stays set until the history has gone quiet, which is checked just before the prompt.
         replaying = true;
-        try {
-          opened = await client.request("session/load", { sessionId: resumeSessionId, cwd, mcpServers: [] });
-        } finally {
-          replaying = false;
-        }
+        opened = await client.request("session/load", { sessionId: resumeSessionId, cwd, mcpServers: [] });
+        lastActivityAt = Date.now();
         sessionId = opened?.sessionId ?? resumeSessionId;
       } else {
         opened = await client.request("session/new", { cwd, mcpServers: [] });
@@ -409,12 +425,14 @@ export const agyBackend = {
       let failure = null;
       client.failure.catch((error) => (failure = error));
       // A call that was declined is not running, whatever status agy leaves it in.
-      const openTools = () => actionsList().filter((action) => OPEN.has(action.status) && action.permission !== "denied");
+      const stillOpen = (action) => OPEN.has(action.status) && action.permission !== "denied";
+      const openTools = () => actionsList().filter((action) => stillOpen(action) && !action.daemon);
       const named = (actions) => actions.map((action) => oneLine(action.title, 80)).join("; ");
 
       /**
        * Wait out the work agy carries on with after ending its turn (see OPEN above).
-       * Returns null when that work is over, or what went wrong with it.
+       * Returns null when that work is over. Otherwise it says what happened, and
+       * whether it is fatal: agy going down is, a command that just never ends is not.
        */
       const settleBackground = async () => {
         // A command can also end just before the turn does, with agy's step on its result
@@ -429,19 +447,16 @@ export const agyBackend = {
         const limitMs = backgroundLimitMs();
         let wakeMs = openTools().length ? BACKGROUND_WAKE_MS : LATE_CLOSE_WAKE_MS;
         while (!cancelled && !stopWaiting) {
-          if (failure) return `agy stopped while it was still at work after ending its turn. ${failure.message}`;
+          if (failure) return { fatal: true, message: `agy stopped while it was still at work after ending its turn. ${failure.message}` };
           await sleep(BACKGROUND_TICK_MS);
           const now = Date.now();
           const quietMs = now - lastActivityAt;
           const open = openTools();
           if (open.length) {
             wakeMs = BACKGROUND_WAKE_MS;
-            if (quietMs >= silenceMs) {
-              return `agy left a command running and gave no sign of life for ${Math.round(silenceMs / 1000)}s, so the job stopped waiting: ${named(open)}`;
-            }
-            if (now - startedAt >= limitMs) {
-              return `agy was still running a command ${Math.round(limitMs / 1000)}s after its turn ended, so the job stopped waiting: ${named(open)}`;
-            }
+            const stopped = (why) => ({ fatal: false, message: `${why}, so the job stopped waiting: ${named(open)}` });
+            if (quietMs >= silenceMs) return stopped(`agy left a command running and gave no sign of life for ${Math.round(silenceMs / 1000)}s`);
+            if (now - startedAt >= limitMs) return stopped(`agy was still running a command ${Math.round(limitMs / 1000)}s after its turn ended`);
             continue;
           }
           if (stepEndedSinceLastClose) {
@@ -453,11 +468,14 @@ export const agyBackend = {
         }
         return null;
       };
-      let backgroundError = null;
+      let background = null;
 
       // agy reports token counts per message, so a job that sends several adds them up.
       // What it spends on steps it takes after ending its turn is not in any of them.
       let usage = null;
+      // agy reports token counts for every turn in which the model ran. A turn that
+      // ends without any never reached the model: agy dropped the prompt.
+      const dropped = (outcome) => outcome?.stopReason === "end_turn" && !outcome.usage;
       const send = async (message) => {
         const outcome = await Promise.race([
           client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: message }] }),
@@ -465,18 +483,34 @@ export const agyBackend = {
           gaveUp
         ]);
         usage = addUsage(usage, toUsage(outcome?.usage));
-        if (outcome?.stopReason === "end_turn") backgroundError ??= await settleBackground();
+        if (outcome?.stopReason === "end_turn" && !dropped(outcome)) background ??= await settleBackground();
         return outcome;
       };
 
+      if (replaying) {
+        const waitedFrom = Date.now();
+        while (Date.now() - lastActivityAt < REPLAY_QUIET_MS && !cancelled && !failure) {
+          if (Date.now() - waitedFrom >= REPLAY_MAX_MS) {
+            onEvent({ type: "note", text: `agy was still replaying the session's history after ${REPLAY_MAX_MS / 1000}s; sending the prompt anyway` });
+            break;
+          }
+          await sleep(REPLAY_TICK_MS);
+        }
+        replaying = false;
+      }
+
       let result = await send(prompt);
-      for (let nudges = 0; nudges < MAX_NUDGES && unanswered.length && !cancelled && !backgroundError && result?.stopReason === "end_turn"; nudges += 1) {
+      // Whatever came in around a prompt that was dropped is history, not an answer.
+      const promptDropped = dropped(result);
+      for (let nudges = 0; nudges < MAX_NUDGES && unanswered.length && !cancelled && !background && result?.stopReason === "end_turn"; nudges += 1) {
         onEvent({ type: "note", text: "agy stopped at a declined request without answering; asking it to finish without" });
         messageBroken = true;
         result = await send(nudgeAfterDeclines(unanswered.splice(0)));
       }
 
       const stop = result?.stopReason;
+      const answer = promptDropped ? "" : text.trim();
+      const actions = promptDropped ? [] : actionsList();
       let status = "completed";
       let error = null;
       if (cancelled || stop === "cancelled") {
@@ -484,13 +518,25 @@ export const agyBackend = {
       } else if (stop !== "end_turn") {
         status = "failed";
         error = `agy stopped early (stopReason: ${stop ?? "unknown"}).`;
-      } else if (backgroundError) {
-        // What agy had said up to then is kept as the answer, under the error.
+      } else if (promptDropped) {
         status = "failed";
-        error = backgroundError;
+        error = "agy ended the turn at once without calling the model, so the prompt was not answered. Send it again. If that fails too, start a new conversation.";
+      } else if (background && (background.fatal || !answer)) {
+        // What agy had said up to then is kept as the answer, under the error. A command
+        // that never ended is a failure only without one: with an answer given, agy may
+        // just have started a server without marking it as one.
+        status = "failed";
+        error = background.message;
       }
 
-      return { status, sessionId, model: usedModel, text: text.trim(), actions: actionsList(), usage, error };
+      // A command that outlives the turn is worth a word to whoever reads the result,
+      // however the turn ended: it is still running on this machine.
+      const notes = [];
+      if (background && background.message !== error) notes.push(background.message);
+      const daemons = actions.filter((action) => stillOpen(action) && action.daemon);
+      if (daemons.length) notes.push(`agy left a command running, as it meant to: ${named(daemons)}`);
+
+      return { status, sessionId, model: usedModel, text: answer, actions, usage, error, notes };
     } finally {
       stopGrace();
       clearInterval(flushTimer);

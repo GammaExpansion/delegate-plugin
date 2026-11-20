@@ -15,13 +15,17 @@ fs.writeFileSync(path.join(scratch, "agy"), `#!/bin/sh\nexec "${process.execPath
 process.env.PATH = `${scratch}${path.delimiter}${process.env.PATH}`;
 const { agyBackend } = await import("../plugins/delegate/scripts/lib/backends/agy.mjs");
 
-async function runScenario(scenario, env = {}) {
+async function runScenario(scenario, env = {}, options = {}) {
   Object.assign(process.env, { FAKE_AGY_SCENARIO: scenario, ...env });
   const events = [];
   const started = Date.now();
-  const result = await agyBackend.run({ cwd: scratch, prompt: "run the tests", onEvent: (event) => events.push(event) });
-  const said = events.map((event) => event.text ?? `${event.action?.kind} ${event.action?.status}`);
-  return { result, said, tookMs: Date.now() - started };
+  try {
+    const result = await agyBackend.run({ cwd: scratch, prompt: "run the tests", onEvent: (event) => events.push(event), ...options });
+    const said = events.map((event) => event.text ?? `${event.action?.kind} ${event.action?.status}`);
+    return { result, said, tookMs: Date.now() - started };
+  } finally {
+    for (const name of Object.keys(env)) delete process.env[name];
+  }
 }
 
 test("a turn that ends with a command still running is waited out, and the rest of the answer is kept", async () => {
@@ -46,12 +50,47 @@ test("agy dying while it carries on is a failure, with what it had said kept", a
   assert.equal(result.text, "Started the tests.");
 });
 
-test("a background command with no sign of life is given up on, and that is a failure too", async () => {
+test("a background command with no sign of life is given up on: the answer stands, with a note", async () => {
   const { result, tookMs } = await runScenario("silent", { DELEGATE_AGY_BACKGROUND_WAIT_SEC: "1" });
+  assert.equal(result.status, "completed");
+  assert.equal(result.error, null);
+  assert.equal(result.text, "Started the tests.");
+  assert.equal(result.notes.length, 1);
+  assert.match(result.notes[0], /left a command running and gave no sign of life for 1s.*npm test/);
+  assert.ok(tookMs < 6000, `took ${tookMs} ms`);
+});
+
+test("given up on with nothing said, it is a failure", async () => {
+  const { result } = await runScenario("wordless", { DELEGATE_AGY_BACKGROUND_WAIT_SEC: "1" });
   assert.equal(result.status, "failed");
   assert.match(result.error, /left a command running and gave no sign of life for 1s.*npm test/);
-  assert.ok(tookMs < 6000, `took ${tookMs} ms`);
-  delete process.env.DELEGATE_AGY_BACKGROUND_WAIT_SEC;
+  assert.equal(result.text, "");
+});
+
+test("a command agy started to keep running is not waited for", async () => {
+  const { result, said, tookMs } = await runScenario("daemon", { DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" });
+  assert.equal(result.status, "completed");
+  assert.equal(result.text, "The server is up.");
+  assert.deepEqual(result.actions.map(({ status, daemon }) => ({ status, daemon })), [{ status: "in_progress", daemon: true }]);
+  assert.deepEqual(result.notes, ["agy left a command running, as it meant to: npm run dev"]);
+  assert.ok(!said.some((text) => /waiting for it to carry on/.test(text)), said.join(" | "));
+  assert.ok(tookMs < 3000, `it waited ${tookMs} ms on a command that was never going to end`);
+});
+
+test("history that a resumed session goes on replaying after it has loaded is not part of the new turn", async () => {
+  const { result, said } = await runScenario("replay-late", {}, { resumeSessionId: "agy-session" });
+  assert.equal(result.status, "completed");
+  assert.equal(result.text, "NEW ANSWER");
+  assert.deepEqual(result.actions, []);
+  assert.ok(!said.some((text) => /old command|OLD ANSWER/.test(text)), said.join(" | "));
+});
+
+test("a turn that ends at once without the model having been called is a failure, not an old answer", async () => {
+  const { result } = await runScenario("replay-swallowed", {}, { resumeSessionId: "agy-session" });
+  assert.equal(result.status, "failed");
+  assert.match(result.error, /without calling the model/);
+  assert.equal(result.text, "");
+  assert.deepEqual(result.actions, []);
 });
 
 test("a declined call that agy never closes is not waited on, and agy is asked to finish without it", async () => {
@@ -61,7 +100,6 @@ test("a declined call that agy never closes is not waited on, and agy is asked t
   assert.deepEqual(result.actions.map(({ status, permission }) => ({ status, permission })), [{ status: "pending", permission: "denied" }]);
   assert.ok(said.some((text) => /stopped at a declined request without answering/.test(text)), said.join(" | "));
   assert.ok(tookMs < 5000, `it waited ${tookMs} ms on a call that was never going to run`);
-  delete process.env.DELEGATE_AGY_BACKGROUND_WAIT_SEC;
 });
 
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));

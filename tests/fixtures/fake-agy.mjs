@@ -8,8 +8,20 @@
 //                answer still comes afterwards
 //   crash        the command is still running when the turn ends, and then agy dies
 //   silent       the command is still running when the turn ends, and nothing more comes
+//   wordless     the same, and agy had not said anything either
+//   daemon       agy starts a command that is meant to keep running (a server), gives its
+//                answer and ends its turn; the command never ends
 //   declined     agy asks to run a command, never reports the call as ended, and ends
 //                its turn without a word; told that nobody can approve, it answers
+//
+// A resumed session (`session/load`) replays its history as updates. A real agy answers
+// the load while a long history is still on its way, which these two play out:
+//
+//   replay-late       the history goes on after the load is answered, pauses, goes on
+//                     again, and the prompt is then answered as usual
+//   replay-swallowed  the same history and then some more, in the middle of which the
+//                     prompt arrives: it comes back at once as a finished turn in which
+//                     the model was never called
 import readline from "node:readline";
 
 const SESSION = "agy-session";
@@ -20,21 +32,55 @@ const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0
 const update = (fields) => send({ method: "session/update", params: { sessionId: SESSION, update: fields } });
 const say = (text) => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
 const stepEnds = () => update({ sessionUpdate: "usage_update", used: 100, size: 1000 });
-const tool = (status, first = false) =>
-  update({ sessionUpdate: first ? "tool_call" : "tool_call_update", toolCallId: "t1", kind: "execute", title: "npm test", status });
+const tool = (status, first = false, more = {}) =>
+  update({ sessionUpdate: first ? "tool_call" : "tool_call_update", toolCallId: "t1", kind: "execute", title: "npm test", status, ...more });
 const later = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const endTurn = (id) => send({ id, result: { stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } } });
+const opened = (id) => send({ id, result: { sessionId: SESSION, models: { currentModelId: "fake-gemini" } } });
+/** agy says something, and that is its whole turn from there. */
+const answer = (id, text) => {
+  say(text);
+  stepEnds();
+  endTurn(id);
+};
 
 let prompts = 0;
 let firstPromptId = null;
 
+/** One step of an earlier turn, the way agy replays it: a call that is already over, and text. */
+const replayStep = (n) => {
+  tool("completed", true, { toolCallId: `old-${n}`, title: `old command ${n}` });
+  say(`OLD ANSWER ${n}`);
+};
+
+async function loadSession(id) {
+  update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "the earlier task" } });
+  replayStep(1);
+  opened(id);
+  await later(20);
+  replayStep(2);
+  await later(300);
+  replayStep(3);
+  stepEnds();
+}
+
 async function playTurn(id) {
   prompts += 1;
+  if (scenario === "replay-swallowed") {
+    replayStep(4); // History was still on its way when the prompt came, which is why it is dropped.
+    return send({ id, result: { stopReason: "end_turn" } });
+  }
+  if (scenario === "replay-late") {
+    await later(500); // A model takes its time, so history still on its way would land in this turn.
+    return answer(id, "NEW ANSWER");
+  }
+  if (scenario === "daemon") {
+    tool("in_progress", true, { title: "npm run dev", rawInput: { CommandLine: "npm run dev", IsDaemon: true, WaitMsBeforeAsync: 500 } });
+    return answer(id, "The server is up.");
+  }
   if (scenario === "declined") {
     if (prompts > 1) {
-      say("I could not run the tests.");
-      stepEnds();
-      return endTurn(id);
+      return answer(id, "I could not run the tests.");
     }
     firstPromptId = id;
     tool("pending", true);
@@ -53,7 +99,7 @@ async function playTurn(id) {
   }
 
   tool("in_progress", true);
-  say("Started the tests.");
+  if (scenario !== "wordless") say("Started the tests.");
   if (scenario === "late-close") {
     tool("completed");
     endTurn(id);
@@ -88,7 +134,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
   switch (message.method) {
     case "session/new":
-      return send({ id: message.id, result: { sessionId: SESSION, models: { currentModelId: "fake-gemini" } } });
+      return opened(message.id);
+    case "session/load":
+      return void loadSession(message.id);
     case "session/prompt":
       return void playTurn(message.id);
     default:

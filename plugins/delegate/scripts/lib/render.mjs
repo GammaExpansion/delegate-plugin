@@ -55,7 +55,18 @@ function renderAction(action) {
   if (action.status) bits.push(action.status);
   if (action.exitCode !== undefined && action.exitCode !== null) bits.push(`exit ${action.exitCode}`);
   if (action.permission === "denied") bits.push("permission denied");
+  if (action.daemon) bits.push("started to keep running");
   return `- [${action.kind}] ${oneLine(action.title, 160)}${bits.length ? ` (${bits.join(", ")})` : ""}`;
+}
+
+/** How the turn ended, the same in both forms of a result. */
+function endingLines(job, result) {
+  const lines = [];
+  if (job.worktree) lines.push(worktreeLine(job));
+  if (result.error) lines.push(`error: ${result.error}`);
+  if (job.status === "cancelled" && !result.error) lines.push("note: the run was cancelled before it finished.");
+  for (const note of result.notes ?? []) lines.push(`note: ${note}`);
+  return lines;
 }
 
 const isDeclined = (action) => action.permission === "denied" || action.status === "declined";
@@ -76,9 +87,7 @@ export function renderAnswer(job, resultCommand = `result ${job.id}`) {
   const result = job.result ?? {};
   const lines = [[`[delegate] ${agentOf(job)}`, job.status, formatDuration(jobDurationMs(job)), permissionOf(job), job.id].join(" · ")];
   if (job.sessionId) lines.push(`session: ${job.sessionId}`);
-  if (job.worktree) lines.push(worktreeLine(job));
-  if (result.error) lines.push(`error: ${result.error}`);
-  if (job.status === "cancelled" && !result.error) lines.push("note: the run was cancelled before it finished.");
+  lines.push(...endingLines(job, result));
   const declined = (result.actions ?? []).filter(isDeclined);
   if (declined.length) {
     lines.push(`declined (${declined.length}):`, ...declined.slice(0, 10).map(renderAction));
@@ -120,9 +129,7 @@ export function renderResult(job) {
     lines.push(`session: ${job.sessionId}  (continue this conversation with: --resume ${job.sessionId})`);
   }
   lines.push(`permission: ${permissionOf(job)}`);
-  if (job.worktree) lines.push(worktreeLine(job));
-  if (result.error) lines.push(`error: ${result.error}`);
-  if (job.status === "cancelled" && !result.error) lines.push("note: the run was cancelled before it finished.");
+  lines.push(...endingLines(job, result));
 
   const actions = result.actions ?? [];
   if (actions.some(isDeclined)) lines.push(declinedNote(job));

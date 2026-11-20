@@ -1,6 +1,7 @@
 // Newline-delimited JSON-RPC over a child process's stdio.
 // Shared by both backends: `codex app-server` and `agy acp` speak the same framing.
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import readline from "node:readline";
 
 import { stripAnsi } from "./text.mjs";
@@ -25,12 +26,14 @@ export class StdioRpcClient {
    * @param {string[]} [options.args]
    * @param {string} [options.cwd]
    * @param {boolean} [options.includeJsonRpcField]  Add `"jsonrpc":"2.0"` to outgoing messages (ACP wants it).
+   * @param {string | null} [options.traceFile]  Write every message sent and received to this file, one JSON object per line.
    */
-  constructor({ command, args = [], cwd, includeJsonRpcField = false }) {
+  constructor({ command, args = [], cwd, includeJsonRpcField = false, traceFile = null }) {
     this.command = command;
     this.args = args;
     this.cwd = cwd;
     this.includeJsonRpcField = includeJsonRpcField;
+    this.traceFile = traceFile;
     this.nextId = 1;
     this.pending = new Map();
     this.stderr = "";
@@ -111,8 +114,19 @@ export class StdioRpcClient {
     clearTimeout(hardTimer);
   }
 
+  /** One line of the trace: when, which way ("sent" or "received"), and the message. */
+  #trace(direction, message) {
+    if (!this.traceFile) return;
+    try {
+      fs.appendFileSync(this.traceFile, `${JSON.stringify({ at: new Date().toISOString(), direction, message })}\n`, { mode: 0o600 });
+    } catch {
+      // A trace that cannot be written must not stop the job.
+    }
+  }
+
   #send(message) {
     const payload = this.includeJsonRpcField ? { jsonrpc: "2.0", ...message } : message;
+    this.#trace("sent", payload);
     try {
       this.child.stdin.write(`${JSON.stringify(payload)}\n`);
     } catch {
@@ -134,8 +148,10 @@ export class StdioRpcClient {
     try {
       message = JSON.parse(line);
     } catch {
+      this.#trace("received", line);
       return; // Not protocol output; ignore.
     }
+    this.#trace("received", message);
 
     const hasId = message.id !== undefined && message.id !== null;
 

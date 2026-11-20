@@ -18,6 +18,7 @@ import { codexBackend } from "./codex.mjs";
  * @property {string} [effort]            Backend-specific reasoning effort.
  * @property {string} [resumeSessionId]   Continue this backend session instead of starting fresh.
  * @property {AbortSignal} [signal]       Abort to interrupt the running turn.
+ * @property {string | null} [traceFile]  Write every message to and from the backend here (see DELEGATE_TRACE).
  * @property {(event: BackendEvent) => void} onEvent
  *
  * @typedef {{ type: "session", sessionId: string, model: string | null, effort?: string | null }   effort only where it is not already part of the model id
@@ -31,6 +32,7 @@ import { codexBackend } from "./codex.mjs";
  * @property {string} [status]
  * @property {number | null} [exitCode]
  * @property {"allowed" | "denied"} [permission]
+ * @property {boolean} [daemon]   The agent started it to keep running (a server), and does not wait for it.
  *
  * @typedef {object} RunResult
  * @property {"completed" | "cancelled" | "failed"} status
@@ -40,6 +42,7 @@ import { codexBackend } from "./codex.mjs";
  * @property {Action[]} actions
  * @property {{ inputTokens: number, outputTokens: number, totalTokens: number } | null} usage
  * @property {string | null} error
+ * @property {string[]} [notes]   What the reader of a result should know besides, such as a command left running.
  *
  * @typedef {object} ModelList
  * @property {{ id: string, name: string, efforts: string[], family?: string, familyName?: string, level?: string }[]} models

@@ -32,6 +32,7 @@ import {
   readLogFrom,
   readLogTail,
   touchHeartbeat,
+  traceFile,
   updateJob,
   writeCursor,
   writeJob
@@ -96,6 +97,10 @@ function leaseSeconds() {
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_LEASE_SEC; // 0 turns the lease off.
 }
+
+// DELEGATE_TRACE, set to anything but 0, has a job write every message to and from its
+// backend to a file beside its log: the prompt and all the backend read or wrote, in full.
+const tracing = () => (process.env.DELEGATE_TRACE || "0") !== "0";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const nowIso = () => new Date().toISOString();
@@ -235,6 +240,7 @@ async function runJob(cwd, id) {
       effort: job.effort,
       resumeSessionId: job.resumeSessionId,
       signal: controller.signal,
+      traceFile: tracing() ? traceFile(cwd, id) : null,
       onEvent: (event) => {
         if (event.type === "session") {
           updateJob(cwd, id, { sessionId: event.sessionId, model: event.model ?? job.model ?? null, shownEffort: event.effort ?? null });
@@ -272,6 +278,8 @@ async function runJob(cwd, id) {
   }
 
   const latest = readJob(cwd, id) ?? job;
+  const notes = result.notes ?? [];
+  for (const note of notes) appendLog(cwd, id, `note: ${note}`);
   appendLog(cwd, id, `finished: ${result.status}${result.error ? ` · ${result.error.split("\n")[0]}` : ""}`);
   return finishJob(
     cwd,
@@ -282,7 +290,7 @@ async function runJob(cwd, id) {
       ...saveAnswer(latest, result.text)
     },
     result.status,
-    { text: result.text, actions: result.actions, usage: result.usage, error: result.error }
+    { text: result.text, actions: result.actions, usage: result.usage, error: result.error, notes }
   );
 }
 

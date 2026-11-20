@@ -366,6 +366,8 @@ plugins/delegate/
 
 Job records live in the system temp directory, under `delegate-plugin/`, in one directory per repository (all its worktrees share it). Set `DELEGATE_STATE_DIR` to keep them somewhere else.
 
+To see what a backend really sent, set `DELEGATE_TRACE=1` where the job is started. The job then writes every JSON-RPC message it sends and receives, with the time, to `<job id>.trace.jsonl` beside its record. The file holds the prompt and everything the delegate read or wrote, in full, and is removed with the record.
+
 ## Tests
 
 ```bash
@@ -382,7 +384,7 @@ Create a file in `scripts/lib/backends/`, give it the following, and register it
 - `settingsFor({ permission, sandbox })` checks a choice and returns `{ permission, sandbox, settings }` with the names in their proper form. It throws on an option the backend does not have.
 - `check()` returns whether the CLI is installed, its version, and its login state.
 - `listModels({ cwd })` returns `{ models, defaultModel, defaultEffort, note }`, where each model is `{ id, name, efforts }`.
-- `run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, onEvent })` runs one turn and returns `{ status, sessionId, model, text, actions, usage, error }`. When the agent asks for approval, the backend declines and makes sure the declined step is among `actions`, with `status: "declined"` or `permission: "denied"`. When `signal` aborts, it must interrupt the running turn, and return within the grace period even if the agent never confirms (`afterAbort` in `lib/abort.mjs`).
+- `run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent })` runs one turn and returns `{ status, sessionId, model, text, actions, usage, error }`, and may add `notes`, lines the reader of a result should see besides, such as a command left running. When the agent asks for approval, the backend declines and makes sure the declined step is among `actions`, with `status: "declined"` or `permission: "denied"`. When `signal` aborts, it must interrupt the running turn, and return within the grace period even if the agent never confirms (`afterAbort` in `lib/abort.mjs`).
 
 `backends/shared.mjs` has the pieces that do not depend on the agent: how the plugin introduces itself, how to refuse a request it cannot answer, the shape of the token counts, and the checks on `--permission` and `--sandbox`.
 
@@ -395,7 +397,10 @@ Then add `agents/<name>.md` so Claude can call it as a subagent.
 - A delegate cannot be approved mid-turn. What needs approval is declined, and letting it through takes another turn with a higher option.
 - Messages and answers are exchanged as files in the session's scratchpad directory, which exists only inside Claude Code. A task started by hand prints its answer.
 - An answer reaches Claude only when Claude reads its file. A result that is passed on unread says nothing but where the answer is.
-- agy runs a slow command in the background and ends its turn before the command has finished. The job waits for it to carry on. It gives up, and the job fails with what agy had said so far, when the command shows no sign of life for 30 minutes (`DELEGATE_AGY_BACKGROUND_WAIT_SEC`) or is still running two hours after the turn ended (`DELEGATE_AGY_BACKGROUND_MAX_SEC`). A server that agy leaves running holds the job open that long.
+- agy runs a slow command in the background and ends its turn before the command has finished. The job waits for it to carry on. It stops waiting when the command shows no sign of life for 30 minutes (`DELEGATE_AGY_BACKGROUND_WAIT_SEC`) or is still running two hours after the turn ended (`DELEGATE_AGY_BACKGROUND_MAX_SEC`). What agy had said by then is the answer, and the result says in a `note:` line that the job stopped waiting. If agy had said nothing, the job fails.
+- A command that agy starts to keep running, such as a server or an emulator, is not waited for: the job ends with the turn and the result names the command in a `note:` line. This goes by the `IsDaemon` mark agy's terminal tool puts on such a call. A server that agy starts without the mark is waited for like any slow command.
+- The command stays running after the job. Nothing in the plugin stops it.
+- agy answers a resumed session's `session/load` while it is still replaying a long history, and marks neither the replayed updates nor their end. A prompt sent during the replay is dropped: the turn comes back at once as finished, with the model never called. So the job takes the history as over once no update has come for one second, and only then sends the prompt. A turn that still comes back that way is reported as failed. This adds about a second to every resumed agy turn.
 - Below `full-access`, Codex cannot commit inside a worktree, because its sandbox does not include the main repository's `.git` directory.
 - After its subagent is interrupted, a delegate keeps running for up to two minutes before the lease stops it. Use `/delegate:cancel` to stop it at once.
 - Job records live in the system temp directory, which the system clears from time to time.

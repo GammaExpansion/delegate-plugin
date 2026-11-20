@@ -117,6 +117,11 @@ export function logFile(cwd, id) {
   return path.join(jobsDir(cwd), `${id}.log`);
 }
 
+/** Every message to and from the backend, written only when DELEGATE_TRACE is set. */
+export function traceFile(cwd, id) {
+  return path.join(jobsDir(cwd), `${id}.trace.jsonl`);
+}
+
 /** Touched by `wait`; the worker reads it to tell whether anyone is still watching. */
 function heartbeatFile(cwd, id) {
   return path.join(jobsDir(cwd), `${id}.heartbeat`);
@@ -343,7 +348,7 @@ export function pruneJobs(cwd, jobs = listJobs(cwd)) {
   const endedAt = (job) => Date.parse(job.finishedAt ?? job.createdAt) || 0;
   const finished = jobs.filter((job) => !isActive(job)).sort((a, b) => endedAt(b) - endedAt(a));
   for (const job of finished.slice(MAX_JOBS)) {
-    const files = [jobFile, logFile, heartbeatFile, cursorFile].map((fileOf) => fileOf(cwd, job.id));
+    const files = [jobFile, logFile, traceFile, heartbeatFile, cursorFile].map((fileOf) => fileOf(cwd, job.id));
     // The answer saved for the job's caller goes with the record. Only the file this
     // plugin would itself have written there is removed, whatever the record names.
     if (job.answerFile && job.answerFile === answerFileOf(job)) files.push(job.answerFile);

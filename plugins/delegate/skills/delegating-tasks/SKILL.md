@@ -91,6 +91,7 @@ Off by default. Pass `isolation: "worktree"` on the `Agent` call only when the u
 - A final message that is a question is not a result. Answer it if this conversation can, otherwise ask the user.
 - After a review, stop and let the user choose what to fix.
 - If the run failed or was cancelled, say so. Do not do the task yourself and present it as the delegate's.
+- A `note:` that a command was left running means it is still running on this machine. Tell the user.
 - If a backend is missing or not logged in, point the user to `/delegate:setup`.
 
 For a job's full record, its state, or to stop it: `node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" result|status|cancel <job-id>`.

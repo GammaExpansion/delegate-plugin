@@ -173,9 +173,9 @@ export const codexBackend = {
    * @param {import("./index.mjs").RunOptions} options
    * @returns {Promise<import("./index.mjs").RunResult>}
    */
-  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, onEvent }) {
+  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent }) {
     const { settings: policy } = settingsFor({ permission, sandbox });
-    const client = new StdioRpcClient({ command: "codex", args: ["app-server"], cwd }).start();
+    const client = new StdioRpcClient({ command: "codex", args: ["app-server"], cwd, traceFile }).start();
     const actions = [];
     const messages = [];
     const finishedTurns = new Map();

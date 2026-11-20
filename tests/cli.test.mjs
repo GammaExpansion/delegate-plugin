@@ -474,6 +474,23 @@ test("the answer handed back is the short form; the full record stays with resul
   assert.match(full, /usage: input 10/);
 });
 
+test("what a backend notes about how a turn ended is in both forms of the result", async () => {
+  const { renderAnswer, renderResult } = await import("../plugins/delegate/scripts/lib/render.mjs");
+  const job = finished("task-noted1", {
+    result: {
+      text: "The server is up.",
+      actions: [{ kind: "execute", title: "npm run dev", status: "in_progress", daemon: true }],
+      usage: null,
+      error: null,
+      notes: ["agy left a command running, as it meant to: npm run dev"]
+    }
+  });
+  assert.equal(renderAnswer(job).split("\n")[2], "note: agy left a command running, as it meant to: npm run dev");
+  const full = renderResult(job);
+  assert.match(full, /^note: agy left a command running, as it meant to: npm run dev$/m);
+  assert.match(full, /- \[execute\] npm run dev \(in_progress, started to keep running\)/);
+});
+
 test("progress batches get further apart as a job gets older", async () => {
   const { settleWindowMs } = await import("../plugins/delegate/scripts/lib/pacing.mjs");
   const seconds = (ageSec) => settleWindowMs(ageSec * 1000) / 1000;

@@ -345,3 +345,7 @@ Then add `agents/<name>.md` so Claude can call it as a subagent.
 - If the hook does not run (the plugin's hooks are disabled, for instance), tasks without `--permission-mode` run in `default` mode, a task can name any mode without you being asked, and the forwarding subagent has no proper way to approve a request, so requests are refused.
 - agy has no login-status command. `/delegate:setup` treats a successful `agy models` call as proof of login, which has not been tested against a logged-out agy.
 - `codex app-server` is marked experimental upstream and its protocol may change between versions. This plugin was tested with codex-cli 0.170.0 and agy 1.5.12.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

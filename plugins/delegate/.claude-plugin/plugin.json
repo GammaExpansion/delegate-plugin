@@ -1,6 +1,6 @@
 {
   "name": "delegate",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Hand tasks to Codex or Antigravity from Claude Code and get the result back.",
   "author": {
     "name": "GammaExpansion",

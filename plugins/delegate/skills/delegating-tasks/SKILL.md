@@ -1,11 +1,24 @@
 ---
 name: delegating-tasks
-description: How to hand work to the delegate:codex and delegate:agy subagents and what to do with what comes back. Read before delegating a task to Codex or Antigravity, when checking on or cancelling a background delegate job, and when a delegate result arrives.
+description: How to start and use agents that run on another vendor's models - OpenAI Codex (GPT models such as Astra, Sol, Terra, Luna) and Google Antigravity (Gemini models such as Neon, Carbon, Argon, Flash) - through the delegate:codex and delegate:agy subagents. Read it before starting an agent on a GPT or Gemini model or handing a task to Codex or Antigravity, when the user names a model you do not recognise, when checking on or cancelling a delegate job, and when a delegate result arrives.
 ---
 
 # Delegating to another vendor's agent
 
 `delegate:codex` (OpenAI Codex) and `delegate:agy` (Google Antigravity) are subagents that forward a task to a different model family and return its answer. The value is an independent view: a model that was trained differently and has not seen this conversation.
+
+## Which agent the user means
+
+| The user asks for | Start | Model |
+|---|---|---|
+| Codex, GPT, or a GPT model by name (Astra, Sol, Terra, Luna, Codex Spark) | `delegate:codex` | `--model <id>` if they named one |
+| Antigravity, agy, Gemini, or a Gemini model by name (Neon, Carbon, Argon, Hydrogen, Flash) | `delegate:agy` | `--model <id>` if they named one |
+| Claude, or a Claude model (Opus, Sonnet, Haiku) | your own subagent, not a delegate | the `model` of the `Agent` call |
+
+- A model name you do not recognise may still be one of theirs: the lists change. Run the `models` command under Flags before telling the user you do not know it.
+- An Antigravity id ends in a thinking level. If the user names a model without one, use `high`, which is what Antigravity itself starts on, and say so.
+- "Two Astra agents" means two subagents, each its own conversation. Start them in the same message so they run side by side.
+- When the user asks for an agent on a named model, start it. The advice below on when delegating is worth it is for when the choice is yours.
 
 ## When it is worth it
 

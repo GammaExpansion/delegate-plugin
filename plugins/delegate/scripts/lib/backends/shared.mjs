@@ -3,7 +3,7 @@ import { notImplemented } from "../rpc.mjs";
 import { oneLine } from "../text.mjs";
 
 /** How this plugin introduces itself to an agent. */
-export const CLIENT_INFO = { name: "delegate-plugin", title: "Delegate plugin for Claude Code", version: "0.2.4" };
+export const CLIENT_INFO = { name: "delegate-plugin", title: "Delegate plugin for Claude Code", version: "0.3.0" };
 
 /**
  * For a request from the agent that nobody here can answer (a question for the user in
@@ -42,7 +42,28 @@ export function addUsage(a, b) {
   };
 }
 
-/** What the agent is told when the user refused a request and said what to do instead. */
-export function refusalReply(request, message) {
-  return `Your request to ${request.summary} was refused. The user's reply:\n${message}`;
+/** "Approve for me", "approve_for_me" -> "approve-for-me". */
+export const optionName = (value) => String(value ?? "").trim().toLowerCase().replace(/[\s_]+/g, "-");
+
+/**
+ * The permission option a turn runs with: the one asked for, or the backend's default.
+ * @param {{ label: string, permissions: Record<string, object>, defaultPermission: string }} backend
+ */
+export function pickPermission(backend, asked) {
+  const name = asked === undefined || asked === null || asked === "" ? backend.defaultPermission : optionName(asked);
+  if (!Object.hasOwn(backend.permissions, name)) {
+    throw new Error(
+      `${backend.label} has no permission option "${asked}". Its options: ${Object.keys(backend.permissions).join(", ")}.`
+    );
+  }
+  return name;
+}
+
+/** `--sandbox` as "enabled" or "disabled", or null when it was not given. */
+export function pickSandbox(asked) {
+  if (asked === undefined || asked === null || asked === "") return null;
+  const word = optionName(asked);
+  if (word === "enabled" || word === "on") return "enabled";
+  if (word === "disabled" || word === "off") return "disabled";
+  throw new Error(`Unknown --sandbox "${asked}". Use enabled or disabled.`);
 }

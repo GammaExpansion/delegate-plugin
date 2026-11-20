@@ -1,11 +1,11 @@
-// How often a caller of `follow` is given news.
+// How often a caller of `wait` is given news.
 //
-// Once a job logs something new, `follow` keeps collecting for a settle window and then
-// returns the whole batch. Each batch costs the forwarding subagent one model call, and
-// every call re-reads all it has seen so far. So the window grows with the job's age:
+// Once a job logs something new, `wait` keeps collecting for a settle window and then
+// returns. Each return costs the forwarding subagent one model call, and every call
+// re-reads all it has seen so far. So the window grows with the job's age:
 // quick updates while a job is young, when most jobs end, and fewer on a long run.
 
-/** With nothing new to report, `follow` returns after this long anyway. */
+/** With nothing new to tell, `wait` returns after this long anyway. */
 export const DEFAULT_MAX_WAIT_SEC = 90;
 
 const SETTLE_WINDOWS = [

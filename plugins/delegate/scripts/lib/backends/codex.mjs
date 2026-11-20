@@ -1,14 +1,14 @@
 // Codex backend: drives `codex app-server` (stdio JSON-RPC).
 //
-// Permissions: what Codex may do without asking is decided by its OS sandbox, chosen
-// from the task's permission mode (see POLICY). When it wants more than that, it asks,
-// and who answers also depends on the mode: the user, Codex's own automatic reviewer,
-// or nobody.
+// Permissions: a turn runs under one of Codex's own permission options (see PERMISSIONS),
+// which sets its sandbox and when it asks for approval. Nobody is there to approve
+// anything while a delegate runs, so every request that reaches this client is declined.
+// Codex records the step as declined and carries on, which is how it ends up in the result.
 import { execFileSync } from "node:child_process";
 import { afterAbort, CANCEL_GRACE_MS } from "../abort.mjs";
 import { StdioRpcClient } from "../rpc.mjs";
 import { clipHead, clipTail, oneLine } from "../text.mjs";
-import { CLIENT_INFO, refusalReply, refuseUnknownRequest, toUsage } from "./shared.mjs";
+import { CLIENT_INFO, pickPermission, pickSandbox, refuseUnknownRequest, toUsage } from "./shared.mjs";
 
 // Token-level deltas are skipped: progress is reported per finished item
 // (a message, a reasoning summary, a command with its output), which is enough to follow along.
@@ -20,27 +20,39 @@ const QUIET_NOTIFICATIONS = [
   "item/commandExecution/outputDelta"
 ];
 
-// Claude Code permission mode -> Codex settings. Each one is a preset Codex has itself
-// (the names in its /permissions menu).
-//   - plan, default     -> "Read Only". Codex asks before it edits or leaves the sandbox,
-//                          and the user answers. In plan mode edits are refused outright.
-//   - dontAsk           -> the same sandbox, but nothing is asked: what the sandbox does
-//                          not allow simply fails. That is what the mode means.
-//   - acceptEdits       -> "Ask for approval": the workspace sandbox, no network. Codex
-//                          asks the user before it steps outside.
-//   - auto              -> "Approve for me" (`codex --approve-for-me` sets these same
-//                          three values): its automatic reviewer answers, not the user.
-//   - bypassPermissions -> "Full Access": no sandbox, network included, nothing asked.
-// `whenAsked` says what happens to an approval request that reaches this client.
-const ASK_THE_USER = { approvalPolicy: "on-request", approvalsReviewer: "user", whenAsked: "user" };
-const POLICY = {
-  plan: { sandbox: "read-only", ...ASK_THE_USER, refuseEdits: true },
-  default: { sandbox: "read-only", ...ASK_THE_USER },
-  dontAsk: { sandbox: "read-only", approvalPolicy: "never", approvalsReviewer: "user", whenAsked: "refuse" },
-  acceptEdits: { sandbox: "workspace-write", ...ASK_THE_USER },
-  auto: { sandbox: "workspace-write", approvalPolicy: "on-request", approvalsReviewer: "auto_review", whenAsked: "user" },
-  bypassPermissions: { sandbox: "danger-full-access", approvalPolicy: "never", approvalsReviewer: "user", whenAsked: "refuse" }
+// Codex's own permission options, under the names of its /permissions menu, and the
+// settings each one stands for. Nothing is translated: a caller names one of these.
+//   - read-only        -> "Read Only": a sandbox that cannot write and has no network.
+//                         Commands that only read still run. It asks before anything more.
+//   - ask-for-approval -> "Ask for approval": a sandbox that can write to the workspace
+//                         and temp directories, no network. It asks before stepping outside.
+//   - approve-for-me   -> "Approve for me" (`codex --approve-for-me`): the same sandbox,
+//                         but Codex's own automatic reviewer answers its requests.
+//   - full-access      -> "Full Access": no sandbox, network included, nothing asked.
+const PERMISSIONS = {
+  "read-only": { sandbox: "read-only", approvalPolicy: "on-request", approvalsReviewer: "user" },
+  "ask-for-approval": { sandbox: "workspace-write", approvalPolicy: "on-request", approvalsReviewer: "user" },
+  "approve-for-me": { sandbox: "workspace-write", approvalPolicy: "on-request", approvalsReviewer: "auto_review" },
+  "full-access": { sandbox: "danger-full-access", approvalPolicy: "never", approvalsReviewer: "user" }
 };
+
+/**
+ * The settings for a turn. `--sandbox` overrides the sandbox an option comes with:
+ * "disabled" takes it away, and "enabled" gives "full-access" the workspace sandbox, so
+ * that Codex asks nothing and still cannot leave the workspace.
+ */
+function settingsFor({ permission, sandbox }) {
+  const name = pickPermission(codexBackend, permission);
+  const choice = pickSandbox(sandbox);
+  const settings = { ...PERMISSIONS[name] };
+  if (choice === "disabled") {
+    if (name === "read-only") throw new Error('Codex\'s "read-only" is its sandbox, so it cannot run with --sandbox disabled. Pick another --permission.');
+    settings.sandbox = "danger-full-access";
+  } else if (choice === "enabled" && name === "full-access") {
+    settings.sandbox = "workspace-write";
+  }
+  return { permission: name, sandbox: choice, settings };
+}
 
 // Codex normally says when a turn is over. If its final answer has arrived, none of its
 // own agents is still at work, and that word has not come after this long, the turn is
@@ -49,7 +61,7 @@ const INFERRED_FINISH_MS = 1500;
 
 // The sandbox as a full policy object. It is sent with every turn, so that a resumed
 // conversation takes this turn's sandbox, not that of its last turn, and so that the
-// user's own Codex config cannot widen or narrow what a mode means.
+// user's own Codex config cannot widen or narrow what an option means.
 const SANDBOX_POLICY = {
   "read-only": { type: "readOnly", networkAccess: false },
   "workspace-write": { type: "workspaceWrite", networkAccess: false },
@@ -68,26 +80,6 @@ async function handshake(client) {
 function describeChange(change) {
   const kind = typeof change.kind === "string" ? change.kind : change.kind?.type ?? "change";
   return `${kind} ${change.path}`;
-}
-
-/** A command Codex wants approved, in the words the user will be shown. */
-function describeCommand(params) {
-  const command = Array.isArray(params?.command) ? params.command.join(" ") : String(params?.command ?? "");
-  const network = params?.networkApprovalContext;
-  const lines = [command || "(Codex did not say which command)"];
-  if (network?.host) lines.push(`network access to: ${network.host}`);
-  if (params?.reason) lines.push(`its reason: ${oneLine(params.reason, 300)}`);
-  return { summary: network?.host ? "use the network" : "run a command", detail: lines.join("\n") };
-}
-
-/** A file change Codex wants approved. The request names the item; the item has the paths. */
-function describeFileChange(params, item) {
-  const changes = (item?.changes ?? []).map(describeChange);
-  const lines = changes.length ? changes.slice(0, 12) : ["(Codex did not say which files)"];
-  if (changes.length > 12) lines.push(`and ${changes.length - 12} more`);
-  if (params?.grantRoot) lines.push(`it also asks to write anywhere under: ${params.grantRoot}`);
-  if (params?.reason) lines.push(`its reason: ${oneLine(params.reason, 300)}`);
-  return { summary: "change files", detail: lines.join("\n") };
 }
 
 function toAction(item) {
@@ -111,6 +103,9 @@ export const codexBackend = {
   name: "codex",
   label: "Codex",
   agentName: "Codex Agent",
+  permissions: PERMISSIONS,
+  defaultPermission: "read-only",
+  settingsFor,
 
   check() {
     const info = { installed: false, version: null, auth: "unknown", hint: null };
@@ -178,16 +173,12 @@ export const codexBackend = {
    * @param {import("./index.mjs").RunOptions} options
    * @returns {Promise<import("./index.mjs").RunResult>}
    */
-  async run({ cwd, prompt, permissionMode, model, effort, resumeSessionId, signal, onEvent, askUser }) {
-    const policy = POLICY[permissionMode];
-    if (!policy) throw new Error(`Codex has no settings for permission mode "${permissionMode}".`);
+  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, onEvent }) {
+    const { settings: policy } = settingsFor({ permission, sandbox });
     const client = new StdioRpcClient({ command: "codex", args: ["app-server"], cwd }).start();
     const actions = [];
     const messages = [];
     const finishedTurns = new Map();
-    // File changes that have started and not finished: an approval request names the
-    // item, and the item is what lists the files.
-    const pendingFileChanges = new Map();
     let notifyTurnFinished = () => {};
     let usage = null;
     let lastError = null;
@@ -257,7 +248,6 @@ export const codexBackend = {
       switch (method) {
         case "item/started": {
           const item = params?.item ?? {};
-          if (item.type === "fileChange" && item.id) pendingFileChanges.set(item.id, item);
           if (item.type === "commandExecution") {
             onEvent({ type: "progress", text: `running command: ${oneLine(item.command)}` });
           }
@@ -270,7 +260,6 @@ export const codexBackend = {
         }
         case "item/completed": {
           const item = params?.item ?? {};
-          pendingFileChanges.delete(item.id);
           if (item.type === "collabAgentToolCall") {
             openCollaborations.delete(item.id);
             considerInferredFinish();
@@ -316,46 +305,19 @@ export const codexBackend = {
     };
 
     client.onRequest = async (method, params) => {
-      const forCommand = method === "item/commandExecution/requestApproval";
-      const forFiles = method === "item/fileChange/requestApproval";
-      if (forCommand || forFiles) {
-        const request = forCommand
-          ? describeCommand(params)
-          : describeFileChange(params, pendingFileChanges.get(params?.itemId));
-        const mayAsk = policy.whenAsked === "user" && !(forFiles && policy.refuseEdits);
-        const answer = mayAsk ? await askUser(request) : { decision: "deny", message: null };
-        const allowed = answer.decision === "allow";
-        // The user's reply goes in as a message to the running turn, after the refusal.
-        if (!allowed && answer.message) setTimeout(() => passOn(request, answer.message), 0);
-        // "decline" refuses this one step. Codex records it as declined and carries on.
-        return { decision: allowed ? "accept" : "decline" };
+      if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
+        // "decline" refuses this one step. Codex reports the step itself as declined
+        // (see item/completed above) and carries on with the turn.
+        return { decision: "decline" };
       }
       if (method.endsWith("/requestApproval")) {
-        // A kind of approval this client does not know how to put to the user.
+        // A kind of approval that comes with no step of its own to report it.
         const action = { kind: "approval", title: params?.reason ?? method, status: "declined" };
         actions.push(action);
         onEvent({ type: "action", action });
         return { decision: "decline" };
       }
       return refuseUnknownRequest(onEvent, method, params);
-    };
-
-    // Tell the running turn what the user said when they refused something. If the turn
-    // will not take it (it may just have ended), the reply is kept and sent as a turn of
-    // its own once this one is over.
-    const undelivered = [];
-    const steers = [];
-    const passOn = (request, message) => {
-      if (cancelled) return;
-      const reply = refusalReply(request, message);
-      steers.push(
-        client
-          .request("turn/steer", { threadId, expectedTurnId: turnId, input: [{ type: "text", text: reply, text_elements: [] }] })
-          .then(
-            () => onEvent({ type: "note", text: "passed the user's reply on to Codex" }),
-            () => undelivered.push(reply)
-          )
-      );
     };
 
     const interrupt = () => {
@@ -373,8 +335,8 @@ export const codexBackend = {
         cwd,
         sandbox: policy.sandbox,
         approvalPolicy: policy.approvalPolicy,
-        // Always sent, so that a conversation resumed after an "auto" turn does not keep
-        // sending its questions to the automatic reviewer.
+        // Always sent, so that a conversation resumed after an "approve-for-me" turn does
+        // not keep sending its questions to the automatic reviewer.
         approvalsReviewer: policy.approvalsReviewer,
         ...(model ? { model } : {})
       };
@@ -383,7 +345,9 @@ export const codexBackend = {
         : await client.request("thread/start", { ephemeral: false, ...threadParams });
       threadId = opened?.thread?.id ?? resumeSessionId;
       const usedModel = opened?.model ?? opened?.thread?.model ?? model ?? null;
-      onEvent({ type: "session", sessionId: threadId, model: usedModel });
+      // The effort this turn runs at: the one asked for, or the one Codex opened the thread with.
+      const usedEffort = effort ?? opened?.reasoningEffort ?? opened?.thread?.reasoningEffort ?? null;
+      onEvent({ type: "session", sessionId: threadId, model: usedModel, effort: usedEffort });
 
       if (signal?.aborted) {
         return { status: "cancelled", sessionId: threadId, model: usedModel, text: "", actions, usage, error: null };
@@ -416,13 +380,7 @@ export const codexBackend = {
         });
       };
 
-      let turn = await runTurn(prompt);
-      for (;;) {
-        await Promise.all(steers.splice(0)); // Know whether each reply got through.
-        if (!undelivered.length || cancelled || turn.status !== "completed") break;
-        onEvent({ type: "note", text: "the turn ended before the user's reply reached Codex; sending it as a follow-up" });
-        turn = await runTurn(undelivered.splice(0).join("\n\n"));
-      }
+      const turn = await runTurn(prompt);
 
       const finals = messages.filter((m) => m.phase === "final_answer");
       const text = finals.length

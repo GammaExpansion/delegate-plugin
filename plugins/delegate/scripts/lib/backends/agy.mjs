@@ -1,57 +1,63 @@
 // Antigravity backend: drives `agy acp` (Agent Client Protocol over stdio).
 //
-// Permissions: two things decide what agy may do, both chosen from the task's
-// permission mode (see POLICY):
-//   - its session mode, which decides what it does without asking
-//   - what happens when it does ask (`session/request_permission`): the user answers,
-//     or the request is refused, or (with no limits at all) it is never asked
+// Permissions: a turn runs under one of agy's own permission options (see PERMISSIONS),
+// which is a session mode or the flag that switches its checks off. Nobody is there to
+// approve anything while a delegate runs, so what agy asks about is declined and listed
+// in the result. The one exception is reading inside the workspace, which is allowed.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { afterAbort, CANCEL_GRACE_MS } from "../abort.mjs";
 import { StdioRpcClient } from "../rpc.mjs";
 import { clipHead, clipTail, oneLine } from "../text.mjs";
-import { CLIENT_INFO, addUsage, refusalReply, refuseUnknownRequest, toUsage } from "./shared.mjs";
+import { CLIENT_INFO, addUsage, pickPermission, pickSandbox, refuseUnknownRequest, toUsage } from "./shared.mjs";
 
 const READ_KINDS = new Set(["read", "search", "think"]);
-const EDIT_KINDS = new Set(["edit", "delete", "move"]);
 
-// Claude Code permission mode -> how agy is started, its session mode, and what happens
-// when it asks. Each mode uses agy's own counterpart where it has one.
-//   - "plan": agy's plan mode. It researches and writes a plan into its own data
-//     directory, not into the workspace. Edits it asks about are refused; anything else
-//     it asks about goes to the user.
-//   - "default": agy's default mode, which asks before every edit and command. The user
-//     answers.
-//   - "dontAsk": the same mode, but every request is refused. That is what the mode means.
-//   - "acceptEdits": agy's accept-edits mode edits files in the workspace without asking.
-//     Commands, and edits outside the workspace, go to the user.
-//   - "auto": agy's auto mode runs edits and commands inside its own sandbox without
-//     asking. What it still asks about goes to the user.
-//   - "bypassPermissions": agy is started with --dangerously-skip-permissions (what its
-//     desktop app calls Turbo), so it does not ask at all. Should it ask anyway, the
-//     answer is yes.
-// Reading and searching inside the workspace is always allowed, and agy rarely asks for
-// it. A read outside the workspace is a request like any other, and so is one that does
-// not say where: agy asks about a read when it thinks the read leaves the workspace.
-const POLICY = {
-  plan: { mode: "plan", whenAsked: "user", refuse: EDIT_KINDS },
-  default: { mode: "default", whenAsked: "user" },
-  dontAsk: { mode: "default", whenAsked: "refuse" },
-  acceptEdits: { mode: "accept-edits", whenAsked: "user" },
-  auto: { mode: "auto", whenAsked: "user" },
-  bypassPermissions: { mode: "default", whenAsked: "allow", args: ["--dangerously-skip-permissions"] }
+// agy's own permission options, and what each one stands for. Nothing is translated: a
+// caller names one of these. The first four are its session modes (`agy --mode`).
+//   - plan             -> it researches and writes a plan into its own data directory,
+//                         not into the workspace. It asks before edits and commands.
+//   - default          -> it asks before every edit and every command.
+//   - accept-edits     -> it edits files in the workspace without asking, and asks before
+//                         commands and before touching anything outside the workspace.
+//   - auto             -> it edits and runs commands without asking, and asks only about
+//                         what it judges risky.
+//   - skip-permissions -> `agy --dangerously-skip-permissions` (Turbo in its desktop app):
+//                         its permission checks are off, so it does not ask at all.
+//                         Should it ask anyway, the answer is yes.
+// `--sandbox enabled` adds agy's own `--sandbox` flag, which restricts its terminal.
+const PERMISSIONS = {
+  plan: { mode: "plan" },
+  default: { mode: "default" },
+  "accept-edits": { mode: "accept-edits" },
+  auto: { mode: "auto" },
+  "skip-permissions": { mode: "default", args: ["--dangerously-skip-permissions"], allowAll: true }
 };
 
-const SUMMARY = {
-  execute: "run a command",
-  edit: "edit a file",
-  delete: "delete a file",
-  move: "move a file",
-  read: "read a file outside the workspace",
-  search: "search outside the workspace",
-  fetch: "fetch from the web"
-};
+function settingsFor({ permission, sandbox }) {
+  const name = pickPermission(agyBackend, permission);
+  const choice = pickSandbox(sandbox);
+  const option = PERMISSIONS[name];
+  return {
+    permission: name,
+    sandbox: choice,
+    settings: { ...option, args: [...(option.args ?? []), ...(choice === "enabled" ? ["--sandbox"] : [])] }
+  };
+}
+
+// agy tends to end its turn at a declined request without saying anything. It is then
+// told, at most this many times, that nobody can approve and asked to finish without.
+const MAX_NUDGES = 2;
+
+/** What agy is told after requests of its were declined and it stopped without a word. */
+function nudgeAfterDeclines(declined) {
+  return [
+    "These requests were declined, because nobody is there to approve requests in this run:",
+    ...declined.map((entry) => `- ${entry}`),
+    "Do not ask for them again. Finish what you can without them, then say plainly what you could not do and what it would have needed."
+  ].join("\n");
+}
 
 /**
  * Whether `target` lies inside `root`, going by where it really is: `..` cannot step out
@@ -68,6 +74,24 @@ function isInside(root, target) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 const FINISHED = new Set(["completed", "failed"]);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// agy runs a command that takes a while in the background: it ends its turn with the
+// command still going, and carries on by itself once the command has finished, with no
+// new prompt. So a turn that ends with a tool call still open is not over. It is over
+// when nothing is open any more and agy has taken the model step that follows a
+// command's end (which closes with a usage update) without starting anything new.
+const BACKGROUND_TICK_MS = 500;
+// After that closing step, how long to listen for anything that still trickles in.
+const BACKGROUND_SETTLE_MS = 3000;
+// If no such step comes this long after the last command ended, agy is not carrying on.
+const BACKGROUND_WAKE_MS = 90_000;
+
+/** How long a background command may run without a sign of life before the turn is ended anyway. */
+function backgroundSilenceMs() {
+  const seconds = Number(process.env.DELEGATE_AGY_BACKGROUND_WAIT_SEC);
+  return (Number.isFinite(seconds) && seconds > 0 ? seconds : 30 * 60) * 1000;
+}
 const FLUSH_INTERVAL_MS = 4000;
 
 /** Text a finished tool call reported, if any (ACP puts it in `content`). */
@@ -115,12 +139,15 @@ function fetchModels() {
   return models;
 }
 
+/**
+ * The option that answers one request. An approval is only ever for this one request,
+ * never a lasting one. A refusal may be any kind of "reject".
+ */
 function pickOption(options, allow) {
-  const exact = allow ? "allow_once" : "reject_once";
-  const prefix = allow ? "allow" : "reject";
+  if (allow) return options.find((option) => option.kind === "allow_once") ?? null;
   return (
-    options.find((option) => option.kind === exact) ??
-    options.find((option) => typeof option.kind === "string" && option.kind.startsWith(prefix)) ??
+    options.find((option) => option.kind === "reject_once") ??
+    options.find((option) => typeof option.kind === "string" && option.kind.startsWith("reject")) ??
     null
   );
 }
@@ -129,6 +156,9 @@ export const agyBackend = {
   name: "agy",
   label: "Antigravity",
   agentName: "Gemini Agent",
+  permissions: PERMISSIONS,
+  defaultPermission: "default",
+  settingsFor,
 
   check() {
     const info = { installed: false, version: null, auth: "unknown", hint: null };
@@ -168,12 +198,11 @@ export const agyBackend = {
    * @param {import("./index.mjs").RunOptions} options
    * @returns {Promise<import("./index.mjs").RunResult>}
    */
-  async run({ cwd, prompt, permissionMode, model, effort, resumeSessionId, signal, onEvent, askUser }) {
-    const policy = POLICY[permissionMode];
-    if (!policy) throw new Error(`agy has no settings for permission mode "${permissionMode}".`);
+  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, onEvent }) {
+    const { permission: permissionName, settings: policy } = settingsFor({ permission, sandbox });
     const client = new StdioRpcClient({
       command: "agy",
-      args: ["acp", ...(policy.args ?? [])],
+      args: ["acp", ...policy.args],
       cwd,
       includeJsonRpcField: true
     }).start();
@@ -183,9 +212,9 @@ export const agyBackend = {
     let replaying = false;
     let cancelled = false;
     let stopGrace = () => {};
-    // What the user said when refusing something. agy takes no message with a refusal, and
-    // a refusal usually ends its turn, so these are sent as the next message once it stops.
-    const replies = [];
+    // Requests declined since agy last said anything. If its turn ends with some still
+    // here, it stopped at the refusal without a word (see MAX_NUDGES).
+    const unanswered = [];
     // agy speaks in several stretches, with thinking and tool calls in between. They are
     // kept apart in the final message, or one stretch would run straight into the next.
     let messageBroken = false;
@@ -207,16 +236,26 @@ export const agyBackend = {
     }, FLUSH_INTERVAL_MS);
     flushTimer.unref();
 
+    // For telling when work that agy carries on in the background is over (see settleBackground).
+    let lastActivityAt = Date.now();
+    let stepEndedSinceLastClose = true;
+
     client.onNotification = (method, params) => {
       // `session/load` replays the whole history as updates before it returns; skip those.
       if (method !== "session/update" || replaying) return;
       const update = params?.update ?? {};
+      lastActivityAt = Date.now();
       switch (update.sessionUpdate) {
+        case "usage_update":
+          // agy reports usage at the end of each model step.
+          stepEndedSinceLastClose = true;
+          return;
         case "agent_message_chunk":
           // After a cancel agy emits a "stream was interrupted, please continue" line.
           // It is not part of the answer and must not reach the caller.
           if (cancelled || update.content?.type !== "text") return;
           flush("thinking");
+          if (update.content.text.trim()) unanswered.length = 0;
           let chunk = update.content.text;
           if (messageBroken && text.trim()) {
             // A new stretch: exactly one blank line between it and the one before.
@@ -252,6 +291,7 @@ export const agyBackend = {
             onEvent({ type: "progress", text: `starting ${action.kind}: ${oneLine(action.title)}` });
           }
           if (FINISHED.has(action.status) && previous.status !== action.status) {
+            stepEndedSinceLastClose = false;
             onEvent({ type: "action", action, output: clipTail(toolOutputText(update)) });
           }
           return;
@@ -282,24 +322,15 @@ export const agyBackend = {
         call.kind === "think" ||
         (READ_KINDS.has(call.kind) && paths.length > 0 && paths.every((target) => isInside(workspace, target)));
 
-      let allow;
-      if (policy.whenAsked === "allow") allow = true;
-      else if (harmless) allow = true;
-      else if (policy.whenAsked === "refuse" || policy.refuse?.has(call.kind)) allow = false;
-      else {
-        const detail = [entry.title, ...paths.filter((target) => !String(entry.title).includes(target))].join("\n");
-        // agy can make several requests of one kind, so the reply names which one it answers.
-        const request = { summary: `${SUMMARY[call.kind] ?? `use a tool (${call.kind ?? "unnamed"})`}`, detail };
-        const answer = await askUser(request);
-        allow = answer.decision === "allow";
-        if (!allow && answer.message) {
-          replies.push(refusalReply({ summary: `${request.summary} (${oneLine(entry.title, 160)})` }, answer.message));
-        }
-      }
-
+      const allow = Boolean(policy.allowAll || harmless);
       const option = pickOption(params?.options ?? [], allow);
-      tools.set(call.toolCallId, { ...(tools.get(call.toolCallId) ?? entry), permission: allow && option ? "allowed" : "denied" });
-      if (!allow) onEvent({ type: "note", text: `denied (permission mode ${permissionMode}): ${entry.kind} ${entry.title}` });
+      const allowed = allow && Boolean(option);
+      tools.set(call.toolCallId, { ...(tools.get(call.toolCallId) ?? entry), permission: allowed ? "allowed" : "denied" });
+      if (!allowed) {
+        const what = `${entry.kind} ${oneLine(entry.title, 160)}`;
+        unanswered.push(what);
+        onEvent({ type: "note", text: `declined (permission ${permissionName}, nobody to ask): ${what}` });
+      }
       if (!option) return { outcome: { outcome: "cancelled" } };
       return { outcome: { outcome: "selected", optionId: option.optionId } };
     };
@@ -341,8 +372,8 @@ export const agyBackend = {
           throw new Error(`agy rejected model "${model}": ${error.message}${available ? `\nAvailable: ${available}` : ""}`);
         }
       }
-      // Set on every turn: a resumed session would otherwise keep the mode of its last turn.
-      // If agy refuses the mode, the turn fails, because the mode is part of the permission.
+      // Set on every turn: a resumed session would otherwise keep the mode of its last turn,
+      // and each turn may name a different one. If agy refuses the mode, the turn fails.
       await client.request("session/set_mode", { sessionId, modeId: policy.mode });
       if (effort) {
         try {
@@ -361,7 +392,34 @@ export const agyBackend = {
       const gaveUp = new Promise((resolve) => {
         stopGrace = afterAbort(signal, CANCEL_GRACE_MS, () => resolve({ stopReason: "cancelled" }));
       });
+      let stopWaiting = false;
+      gaveUp.then(() => (stopWaiting = true));
+      client.failure.catch(() => (stopWaiting = true));
+      const openTools = () => actionsList().filter((action) => action.status === "in_progress" || action.status === "pending");
+
+      // Wait out the work agy carries on with after ending its turn (see BACKGROUND_TICK_MS).
+      const settleBackground = async () => {
+        if (!openTools().length) return;
+        onEvent({ type: "note", text: "agy ended its turn with a command still running; waiting for it to carry on" });
+        const silenceMs = backgroundSilenceMs();
+        while (!cancelled && !stopWaiting) {
+          await sleep(BACKGROUND_TICK_MS);
+          const quietMs = Date.now() - lastActivityAt;
+          const open = openTools();
+          if (open.length) {
+            if (quietMs < silenceMs) continue;
+            onEvent({
+              type: "note",
+              text: `still running after ${Math.round(silenceMs / 1000)}s without a sign of life, and stopped with the job: ${open.map((action) => oneLine(action.title, 80)).join("; ")}`
+            });
+            return;
+          }
+          if (stepEndedSinceLastClose ? quietMs >= BACKGROUND_SETTLE_MS : quietMs >= BACKGROUND_WAKE_MS) return;
+        }
+      };
+
       // agy reports token counts per message, so a job that sends several adds them up.
+      // What it spends on steps it takes after ending its turn is not in any of them.
       let usage = null;
       const send = async (message) => {
         const outcome = await Promise.race([
@@ -370,17 +428,15 @@ export const agyBackend = {
           gaveUp
         ]);
         usage = addUsage(usage, toUsage(outcome?.usage));
+        if (outcome?.stopReason === "end_turn") await settleBackground();
         return outcome;
       };
 
       let result = await send(prompt);
-      // Each reply the user gave with a refusal becomes one more message in the same turn
-      // of the job, so that agy can act on it instead of stopping at the refusal.
-      while (replies.length && !cancelled && result?.stopReason === "end_turn") {
-        const reply = replies.splice(0).join("\n\n");
-        onEvent({ type: "note", text: "passing the user's reply on to agy" });
+      for (let nudges = 0; nudges < MAX_NUDGES && unanswered.length && !cancelled && result?.stopReason === "end_turn"; nudges += 1) {
+        onEvent({ type: "note", text: "agy stopped at a declined request without answering; asking it to finish without" });
         messageBroken = true;
-        result = await send(reply);
+        result = await send(nudgeAfterDeclines(unanswered.splice(0)));
       }
 
       const stop = result?.stopReason;

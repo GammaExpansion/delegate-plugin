@@ -1,7 +1,7 @@
 // Plain-text rendering of jobs. The output is read by Claude and relayed to the user,
 // so it stays compact and labels everything the reader needs to act on.
 
-import { FALLBACK_MODE } from "./permission.mjs";
+import { effortLabel } from "./backends/shared.mjs";
 import { isActive } from "./state.mjs";
 import { oneLine } from "./text.mjs";
 
@@ -22,16 +22,22 @@ export function jobDurationMs(job) {
   return end - start;
 }
 
-// A record written before permission modes existed has none.
-const modeOf = (job) => job.permissionMode ?? FALLBACK_MODE;
+/** The permission option a job ran with, and its sandbox override if it had one. */
+const permissionOf = (job) => `${job.permission ?? "?"}${job.sandbox ? `, sandbox ${job.sandbox}` : ""}`;
 
 const worktreeLine = (job) =>
   `worktree: ${job.worktree.path}${job.worktree.branch ? `  (branch ${job.worktree.branch})` : ""}`;
 
-/** Who is doing the work: the agent's name, with the model once the job knows it. */
+/**
+ * Who is doing the work: the agent's name, with the model once the job knows it, and
+ * the reasoning effort where the backend reports one apart from the model, as in
+ * "Codex Agent (gpt-6.2-astra xHigh)". An agy model id already ends in its level.
+ */
 export function agentOf(job) {
   const name = job.agentName ?? job.backend;
-  return job.model ? `${name} (${job.model})` : name;
+  if (!job.model) return name;
+  const effort = effortLabel(job.shownEffort);
+  return `${name} (${job.model}${effort ? ` ${effort}` : ""})`;
 }
 
 function headline(job) {
@@ -40,7 +46,7 @@ function headline(job) {
     job.id,
     job.status,
     formatDuration(jobDurationMs(job)),
-    modeOf(job)
+    permissionOf(job)
   ].join(" · ");
 }
 
@@ -52,31 +58,54 @@ function renderAction(action) {
   return `- [${action.kind}] ${oneLine(action.title, 160)}${bits.length ? ` (${bits.join(", ")})` : ""}`;
 }
 
-const isRefused = (action) => action.permission === "denied" || action.status === "declined";
+const isDeclined = (action) => action.permission === "denied" || action.status === "declined";
+
+/** What to tell the reader of a result in which the delegate was refused something. */
+const declinedNote = (job) =>
+  `note: nobody can approve a request while a delegate runs, so these were declined. This turn ran with --permission ${job.permission ?? "?"}. To let the delegate do them, continue this conversation with an option that allows more.`;
 
 /**
  * A finished job as the forwarding subagent hands it back: the answer, under the few
  * lines its reader needs in order to act on it. Everything else (the actions, the token
- * counts, where the permission mode came from) is in the full record, which `result`
- * prints.
+ * counts) is in the full record, which `result` prints.
  *
- * The session id is given on the turn that opened the session. A later turn was started
- * with that id, so the caller already has it.
+ * The session id is on every result, so that whoever continues the conversation finds
+ * it in the latest one and never has to look further back.
  */
 export function renderAnswer(job) {
   const result = job.result ?? {};
-  const lines = [[`[delegate] ${agentOf(job)}`, job.status, formatDuration(jobDurationMs(job)), modeOf(job), job.id].join(" · ")];
-  if (job.sessionId && job.sessionId !== job.resumeSessionId) lines.push(`session: ${job.sessionId}`);
+  const lines = [[`[delegate] ${agentOf(job)}`, job.status, formatDuration(jobDurationMs(job)), permissionOf(job), job.id].join(" · ")];
+  if (job.sessionId) lines.push(`session: ${job.sessionId}`);
   if (job.worktree) lines.push(worktreeLine(job));
   if (result.error) lines.push(`error: ${result.error}`);
   if (job.status === "cancelled" && !result.error) lines.push("note: the run was cancelled before it finished.");
-  const refused = (result.actions ?? []).filter(isRefused);
-  if (refused.length) {
-    lines.push(`refused (${refused.length}):`, ...refused.slice(0, 10).map(renderAction));
-    if (refused.length > 10) lines.push(`- … ${refused.length - 10} more`);
+  const declined = (result.actions ?? []).filter(isDeclined);
+  if (declined.length) {
+    lines.push(`declined (${declined.length}):`, ...declined.slice(0, 10).map(renderAction));
+    if (declined.length > 10) lines.push(`- … ${declined.length - 10} more`);
+    lines.push(declinedNote(job));
   }
-  lines.push("", result.text ? result.text : "(no message)");
+  if (job.answerFile) {
+    // The answer went to a file, so that it does not have to be retyped by whoever passes
+    // this on. All they pass on is where it is.
+    const words = String(result.text ?? "").split(/\s+/).filter(Boolean).length;
+    lines.push(`answer: ${job.answerFile}`, `The answer (${words.toLocaleString("en-US")} words) is in that file and is not repeated here. Read the file.`);
+  } else {
+    lines.push("", result.text ? result.text : "(no message)");
+  }
   return lines.join("\n");
+}
+
+/**
+ * What `run` and `wait` print while the job is not over. The first line never varies,
+ * so that it can be told from an answer at a glance. The other two are ready to use:
+ * what to show the user, and the command that waits for the next news.
+ */
+export const STILL_RUNNING = "[delegate] still running";
+
+export function renderRunning(job, what, nextCommand) {
+  const description = [agentOf(job), formatDuration(jobDurationMs(job)), what || "still working"].join(" · ");
+  return [STILL_RUNNING, `description: ${description}`, `next: ${nextCommand}`].join("\n");
 }
 
 /** The full record of a finished job, for `result`. */
@@ -86,18 +115,13 @@ export function renderResult(job) {
   if (job.sessionId) {
     lines.push(`session: ${job.sessionId}  (continue this conversation with: --resume ${job.sessionId})`);
   }
-  lines.push(`permission mode: ${modeOf(job)}  (${job.permissionSource ?? "not recorded"})`);
+  lines.push(`permission: ${permissionOf(job)}`);
   if (job.worktree) lines.push(worktreeLine(job));
   if (result.error) lines.push(`error: ${result.error}`);
   if (job.status === "cancelled" && !result.error) lines.push("note: the run was cancelled before it finished.");
 
   const actions = result.actions ?? [];
-  const refused = actions.filter(isRefused).length;
-  if (refused) {
-    lines.push(
-      `note: ${refused} action(s) were refused. The turn ran in permission mode "${modeOf(job)}".`
-    );
-  }
+  if (actions.some(isDeclined)) lines.push(declinedNote(job));
 
   lines.push("", "--- final message ---", result.text ? result.text : "(no message)");
 
@@ -117,30 +141,17 @@ export function renderResult(job) {
   return lines.join("\n");
 }
 
-/** The request a job is waiting on, for the caller that has to put it to the user. */
-export function renderPending(job) {
-  const { id, summary, detail } = job.pending;
-  const lines = ["=== APPROVAL NEEDED ===", `request: ${id}`, `${agentOf(job)} asks to ${summary}`];
-  for (const line of String(detail ?? "").split("\n")) if (line.trim()) lines.push(`  ${line}`);
-  lines.push(`Put it to the user with: answer ${job.id} ${id} allow`);
-  return lines.join("\n");
-}
-
-export function renderStarted(job) {
-  return `[delegate] started ${job.id} · ${agentOf(job)} · ${modeOf(job)}   (follow ${job.id} --offset 0)`;
-}
-
 export function renderStatusList(jobs) {
   if (!jobs.length) return "No delegate jobs for this workspace yet.";
   const rows = jobs.map((job) => ({
     id: job.id,
     backend: job.backend,
     status: job.status,
-    mode: modeOf(job),
+    permission: permissionOf(job),
     time: formatDuration(jobDurationMs(job)),
     task: oneLine(job.prompt, 60)
   }));
-  const columns = ["id", "backend", "status", "mode", "time", "task"];
+  const columns = ["id", "backend", "status", "permission", "time", "task"];
   const widths = Object.fromEntries(columns.map((c) => [c, Math.max(c.length, ...rows.map((r) => r[c].length))]));
   const line = (row) => columns.map((c) => row[c].padEnd(widths[c])).join("  ").trimEnd();
   return [line(Object.fromEntries(columns.map((c) => [c, c]))), ...rows.map(line)].join("\n");

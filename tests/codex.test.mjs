@@ -21,9 +21,7 @@ async function runScenario(scenario) {
   const result = await codexBackend.run({
     cwd: scratch,
     prompt: "do the thing",
-    permissionMode: "default",
-    onEvent: (event) => events.push(event),
-    askUser: async () => ({ decision: "deny", message: null })
+    onEvent: (event) => events.push(event)
   });
   const said = events.filter((event) => event.type !== "session").map((event) => event.text ?? event.action?.kind);
   return { result, said, tookMs: Date.now() - started };
@@ -53,6 +51,30 @@ test("the turn is not taken as finished while a subagent is still at work", asyn
   assert.equal(result.status, "completed");
   // The subagent goes on for a second after the final answer. Only then does the wait begin.
   assert.ok(tookMs >= 2400, `ended after ${tookMs} ms, before the subagent was done`);
+});
+
+test("a request for approval is declined, and the declined step is in the result", async () => {
+  const { result } = await runScenario("approval");
+  assert.equal(result.status, "completed");
+  assert.equal(result.text, "the answer was decline");
+  assert.deepEqual(
+    result.actions.map(({ kind, title, status }) => ({ kind, title, status })),
+    [{ kind: "command", title: "touch b.txt", status: "declined" }]
+  );
+});
+
+test("each permission option is Codex's own, and --sandbox overrides its sandbox", () => {
+  const sandboxOf = (permission, sandbox) => codexBackend.settingsFor({ permission, sandbox }).settings.sandbox;
+  assert.equal(codexBackend.settingsFor({}).permission, "read-only");
+  assert.equal(sandboxOf("read-only"), "read-only");
+  assert.equal(sandboxOf("ask-for-approval"), "workspace-write");
+  assert.equal(codexBackend.settingsFor({ permission: "Approve for me" }).settings.approvalsReviewer, "auto_review");
+  assert.equal(sandboxOf("full-access"), "danger-full-access");
+  assert.equal(sandboxOf("full-access", "enabled"), "workspace-write");
+  assert.equal(sandboxOf("ask-for-approval", "disabled"), "danger-full-access");
+  assert.throws(() => sandboxOf("read-only", "disabled"), /cannot run with --sandbox disabled/);
+  assert.throws(() => sandboxOf("auto"), /no permission option "auto".*read-only, ask-for-approval/);
+  assert.throws(() => sandboxOf("read-only", "maybe"), /Use enabled or disabled/);
 });
 
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));

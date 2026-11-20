@@ -67,8 +67,9 @@ Ask Codex what this repository does, in three sentences
 
 - Two subagents, `delegate:codex` and `delegate:agy`, which Claude picks when you ask for Codex or Antigravity.
 - Six commands: `/delegate:run`, `/delegate:status`, `/delegate:result`, `/delegate:cancel`, `/delegate:models` and `/delegate:setup`.
-- One skill, which tells Claude when to delegate and how to brief a delegate.
-- One hook, which runs before every Bash call of a session. It acts only on this plugin's own commands and lets everything else through. Keep it enabled: it is what passes your permission mode to a delegate, and what puts a delegate's permission requests to you. See [Permission model](#permission-model).
+- One skill, which tells Claude when to delegate, how to brief a delegate, and how to choose what it may do.
+
+It adds no hooks.
 
 ### Update or remove
 
@@ -106,17 +107,19 @@ Or use the commands:
 
 ```text
 /delegate:run codex find out why tests/session.test.ts fails intermittently
-/delegate:run agy --permission-mode acceptEdits fix the bug in math.js
+/delegate:run agy --permission accept-edits fix the bug in math.js
 /delegate:status
 /delegate:result task-abc123
 /delegate:cancel task-abc123
 /delegate:models
 ```
 
-| Flag | Effect |
+| Option | Effect |
 |---|---|
-| `--permission-mode <mode>` | Sets what the delegate may do this turn, using Claude Code's mode names: `plan`, `default`, `dontAsk`, `acceptEdits`, `auto`, `bypassPermissions`. Left out, the turn follows the conversation's permission mode. See [Permission model](#permission-model). |
+| `--permission <option>` | What the delegate may do this turn, as one of the backend's own options. Codex: `read-only`, `ask-for-approval`, `approve-for-me`, `full-access`. Antigravity: `plan`, `default`, `accept-edits`, `auto`, `skip-permissions`. See [Permission model](#permission-model). |
+| `--sandbox enabled` or `disabled` | Overrides the sandbox that comes with the permission option. |
 | `--worktree` | Only on `/delegate:run`. Runs the delegate in its own git worktree. Off by default. See [Worktrees](#worktrees). |
+| `--brief-file <path>` | Takes the brief, or the long part of it, from a file. |
 | `--model <id>` | Picks a model. Left out, the backend uses its own default. `/delegate:models` lists the ids each backend accepts. |
 | `--effort <level>` | Picks a reasoning effort. |
 
@@ -128,9 +131,11 @@ A delegate behaves like any other Claude Code subagent:
 - To follow up ("now apply the first fix you proposed"), Claude continues the same subagent. The delegate remembers the whole conversation.
 - A new subagent is a new conversation. Several can run side by side.
 
-Nobody has to keep track of ids. Under the hood the backend process exits after every turn, and the conversation lives in the backend's own session store. The first result prints that session's id, and the forwarding subagent, which still has it in context, passes it back with `--resume` on every later turn.
+Nobody has to keep track of ids. Under the hood the backend process exits after every turn, and the conversation lives in the backend's own session store. Every result prints that session's id, and the forwarding subagent passes the latest one back with `--resume` on the next turn.
 
-A conversation takes one turn at a time. Once its subagent is gone (the Claude Code session ended, for instance), the conversation can still be reopened by hand with `task --resume <session-id>`.
+Each turn can have its own options. A delegate that was refused something under `read-only` can be given `ask-for-approval` on the next turn of the same conversation, and it carries on from where it stopped. A turn that names no `--permission` keeps what the conversation's last turn had.
+
+A conversation takes one turn at a time. Once its subagent is gone (the Claude Code session ended, for instance), the conversation can still be reopened by hand with `run --resume <session-id>`.
 
 ## Worktrees
 
@@ -146,48 +151,70 @@ To give a delegate its own copy of the repository, ask for it ("have Codex do th
 What to know before using it:
 
 - A worktree is a fresh checkout. Uncommitted changes in the main checkout are not in it. By default Claude Code starts it from the repository's default remote branch, so unpushed local commits are missing too. Set `worktree.baseRef` to `"head"` in Claude Code's settings to start from the current local commit. Files that git ignores are copied only if a `.worktreeinclude` file lists them.
-- Codex cannot commit inside a worktree while it is sandboxed, which is every mode except `bypassPermissions`. A worktree's index lives in the main repository's `.git` directory, which is outside the sandbox. Its edits are left uncommitted in the worktree. agy can commit when its mode lets it run commands.
+- Codex cannot commit inside a worktree while it is sandboxed, which is every option except `full-access`. A worktree's index lives in the main repository's `.git` directory, which is outside the sandbox. Its edits are left uncommitted in the worktree. agy can commit when its option lets it run commands.
 - It needs a git repository.
 
 ## How a task runs
 
 Every task runs the same way:
 
-1. The subagent calls `task`, which starts the delegate as a detached job and returns a job id at once.
-2. The subagent calls `follow <job-id> --offset <n>` in a loop. Each call returns what the delegate did since the last one: commands and their output, file edits, interim messages, reasoning summaries. After each call the subagent writes a one-line progress note. If the delegate needs your permission, `follow` returns with the request, and the subagent puts it to you (see [Permission model](#permission-model)).
-3. When the job has ended, `follow` prints the result and the subagent returns it unchanged.
+1. The subagent saves the request to a file in its scratchpad directory and calls `run --message-file <that file>`. `run` reads the options from the top of the request, removes the file, starts the delegate as a detached job, and waits for its first news.
+2. While the job is not over, the output is three lines: `[delegate] still running`, one line on what the delegate did last, and the `wait` command to run next. The subagent runs that command, with that line as the description of the call, which is what you see while the delegate works.
+3. When the job has ended, the delegate's answer is saved as `<job>.md` in the same scratchpad directory. The output is a few lines: the agent, the model, the outcome, the permission option and the job, the session id, anything that was declined, and the path of that file. The subagent returns those lines unchanged, and Claude reads the file.
 
-What comes back is short on purpose: one line naming the agent, the model, the outcome and the job, then the delegate's answer. The subagent's model has to read that text and write it out again, and Claude then carries it for the rest of the conversation, so anything else in it would be paid for three times. The full record of a job, with every action and the token counts, is one command away: `/delegate:result <job-id>`.
+The subagent's model decides nothing along the way, and nothing long passes through it. It does not keep an offset, judge whether the job has finished, summarise progress, or retype the answer. It writes the request to a file once, copies a command and a line of text, and at the end returns a few lines it was given.
 
-The delegate is shown as `Codex Agent` or `Gemini Agent`, with the model it is running on once that is known, as in `Codex Agent (gpt-6.2-astra)`. The name leads each progress note, each permission request, and the first line of the result.
+The request file is removed as soon as it has been read. An answer file stays in the scratchpad until its job's record is pruned (the newest 50 finished jobs of a repository are kept) or Claude Code clears the scratchpad, whichever comes first.
+
+The full record of a job, with every action and the token counts, is one command away: `/delegate:result <job-id>`.
+
+The delegate is shown as `Codex Agent` or `Gemini Agent`, with the model it is running on once that is known, as in `Codex Agent (gpt-6.2-astra xHigh)`. Codex's reasoning effort is shown beside its model. An agy model id already ends in its thinking level. The name leads each progress line and the first line of the result.
 
 Codex can start agents of its own. What they do appears in the progress under their names (`subagent explorer: ...`), and is not part of the answer.
 
-`follow` returns when there is something to report, not on a timer. Once the delegate logs new activity, `follow` keeps collecting for a short settle window (6 seconds in a job's first minute, 15 up to five minutes, 60 after that) and returns that batch. If the delegate is silent it returns after 90 seconds. Progress therefore arrives in batches, not token by token.
+`wait` returns when there is something to tell, not on a timer. Once the delegate logs new activity, `wait` keeps collecting for a short settle window (6 seconds in a job's first minute, 15 up to five minutes, 60 after that) and then returns. If the delegate is silent it returns after 90 seconds. Progress therefore arrives in steps, not token by token.
 
-The forwarding subagent keeps everything it reads in its context, and that context lasts for the whole conversation. So `follow` shows a compact view by default: reasoning entries are left out, only the last two lines of a command's output are kept, and interim messages are cut short. The full log stays on disk.
-
-To watch a job yourself, run `follow --verbose` in a terminal or read the job log.
+To watch a job in more detail, run `status <job-id>` in a terminal or read the job log.
 
 To keep working while a delegate runs, have Claude run the subagent in the background. Claude Code reports back when it finishes.
 
 ## Design decisions
 
+### The script decides, the subagent copies
+
+The forwarding subagent is a model, and every decision left to a model is one it can get wrong. An earlier version left it many: move flags out of the request and onto the command line, carry a byte offset from call to call, tell a finished job from a running one, cut the result out from under a marker line, summarise the log into a progress note, and take a permission request to the user and back.
+
+- **What changed.** All of that is now in the script. The options stay in the request, where the script reads them. The offset is a file beside the job. The first line of the output says whether the job is over. The progress line and the next command are written out ready to use.
+- **What is left to the model.** Two things that Claude Code gives a script no way to do: issuing the next tool call, whose description is the only place progress can be shown, and remembering the session id between turns, because a script run through Bash is not told which subagent called it.
+- **What it costs.** The progress line is made mechanically from the last thing the delegate did, so it reads plainer than a model's summary.
+- **What it saves.** The subagent reads neither the delegate's log nor its answer. Its context stops growing with the job, and the delegate's output has no way into its instructions.
+
+### Long text travels in files
+
+Neither the request nor the answer is put through a shell command or retyped by the subagent's model. Both were, in an earlier version, and both broke under long content:
+
+- **The request went in a heredoc.** Claude Code checks every Bash command before running it, and that check reads the heredoc's body. A brief that quoted ordinary code was refused as a suspicious command, so the delegate never got it. A heredoc also ends at the first line equal to its closing marker, and the marker a model "makes up at random" turned out to be the same string nearly every time.
+- **The answer was retyped.** The subagent's model read the answer and wrote it out again for Claude. In a run of nine long answers, two came back with a word changed (a wrong path in one), and one subagent then added a correction of its own to the next answer. Claude Code also shows a command's output only up to about 30 KB: a 43 KB answer reached the subagent as its first 2 KB.
+
+- **What replaced them.** The subagent writes the request to a file with its Write tool, which no shell sees. The script writes the answer to a file, and Claude reads it with its own Read tool. What the subagent handles is a path each way.
+- **Why the scratchpad.** Claude Code gives each session a scratchpad directory that its agents read and write without asking. A file in the system's temp directory would need your permission to be read.
+- **What it costs.** One more call by the subagent for each message, and one read by Claude for each answer, even a one-line one.
+- **What is still retyped.** The request, once, by the subagent, into the file. For a long brief or one with code, Claude can write the brief to a file itself and name it with `--brief-file`, and then nothing is.
+
 ### One way to run a task
 
-There is no background mode and no blocking `wait` command. Both existed in an earlier version and were removed.
+There is no background mode. One existed in an earlier version and was removed.
 
-- **What it replaced.** The subagent used to run the delegate inside one blocking shell command. That command was bound by Claude Code's 10-minute limit, and nothing the delegate did was visible until it ended. Long tasks needed a second path: `--background` to detach the job, and `wait` to find out when it had finished.
-- **Why one path is enough.** Following the job in short calls has no time limit and shows progress, which covers what the second path was for. Not blocking the main conversation is something Claude Code already does for any subagent, so the plugin does not need its own mechanism.
-- **What it costs.** Each `follow` call is one call to the subagent's model, and the subagent's context grows with what it reads. A blocking `wait` used no model calls while the job ran. One path that always shows progress was judged worth more than a cheaper second path that has to be explained and chosen. Measured on a Sonnet subagent, a task costs a fixed few cents to start and under a cent for each batch of progress after that. Three things keep it there: the subagent reports progress in one place only, batches get further apart as a job gets older, and the subagent's instructions are kept short.
+- **Why a loop at all.** A Bash call from Claude Code lasts ten minutes at most, and nothing a command does is visible until it returns. A task can take far longer, so the job runs detached and is waited on in short calls.
+- **Why one path is enough.** Waiting in short calls has no time limit and shows progress. Not blocking the main conversation is something Claude Code already does for any subagent, so the plugin does not need its own mechanism.
+- **What it costs.** Each `wait` call is one call to the subagent's model. It is a small one: three lines in, one command out.
 
 ### A conversation is a subagent
 
 Continuing a delegate conversation means continuing its subagent, exactly as with a native subagent. An earlier version had the main agent keep job ids and pass `--resume <id>` to a fresh subagent each turn.
 
 - **Why.** The point of the plugin is that Codex and Antigravity can be used the way subagents are. Claude's habit is to continue a subagent by sending it a message. With a stateless forwarder that habit silently opened a new conversation, and the delegate had forgotten what came before, including any question it had just asked.
-- **How.** The forwarding subagent's own context already holds every result it returned, and each result names the backend session. It is told to resume that session whenever one exists.
-- **What it costs.** The forwarder's context now grows across the turns of a conversation where it used to start empty each turn. The compact `follow` view keeps that growth small, and Claude Code compacts a subagent's context by itself when it fills up.
+- **How.** Every result names the backend session. The forwarding subagent is told to resume the session of the most recent result it has.
 - **What it gives up.** A conversation is tied to its subagent's lifetime. Reopening it later is possible but manual.
 
 ### Worktrees belong to Claude Code, and are off by default
@@ -199,117 +226,125 @@ The plugin creates no worktrees of its own. Isolation is the option Claude Code 
 - **What the plugin had to change.** Job records used to be grouped by checkout, which hid a worktree's jobs from the main checkout. They are now grouped by repository.
 - **What it gives up.** Isolation only exists inside Claude Code. A task started by hand runs wherever it was started.
 
-### Permission requests go to the user
+### Permissions are the backend's own, and nobody approves mid-turn
 
-When a delegate wants something its mode does not already allow, the request is put to you through Claude Code's own permission dialog. An earlier version refused every such request, on the grounds that nobody could be asked in the middle of a delegated turn.
+A turn runs under one of the backend's own permission options, named on the request. What that option does not allow is declined and reported. To allow more, the same conversation is continued with another option.
 
-- **Why.** Refusing made the modes mean something different for a delegate than for Claude. `default` became read-only, agy could run no command at all below `auto`, and a refused `ls` was enough to end an agy turn with nothing to show. A native subagent asks you. A delegate should too.
-- **How it can work at all.** Both backends wait for an answer as long as they have to, so the job can hold a request open. The plugin has no dialog of its own. It borrows Claude Code's: the subagent runs a command, and the hook has Claude Code ask you before that command runs.
-- **Why the hook, and a secret.** The subagent that runs the command is a model reading another model's output. It must not be able to approve on your behalf. So an approval counts only with a mark that the hook attaches, and the hook attaches it only on the path where you are asked.
-- **What it costs.** Every request is a round trip through the subagent's model and a click from you.
-- **Where it stops.** `dontAsk` still refuses everything, because that is what the mode means, and a non-interactive run has nobody to ask.
+An earlier version did two things differently, and both were removed:
 
-### `follow` is driven by activity, not by a clock
+- **It translated Claude Code's permission modes.** A hook read the conversation's mode before every Bash call and mapped it onto each backend's settings. The three vendors cut permissions differently, so the mapping was a table of approximations that had to be explained row by row, and the hook needed a parser for the subagent's shell commands that had to agree exactly with the script's own. Two ways were found to make them disagree and step past the check.
+- **It put a delegate's requests to the user.** The job held the request open, the subagent ran a command, and the hook turned that command into Claude Code's permission dialog. It took a third of the subagent's instructions, a secret file, a waiting queue and a 30-minute timeout, and its main path, a click on "allow", could never be exercised in a test.
 
-The subagent's model can only act when a tool call returns, so the delegate cannot push a message to it. The nearest thing is a call that blocks until there is news. `follow` does that: the script watches the job log (cheap, no model involved) and returns only when the delegate has done something, when it has ended, or after 90 seconds of silence. A delegate that thinks quietly for five minutes costs three or four calls. A busy one costs at most one call per settle window.
+What replaced them:
 
-### A job needs a follower
+- **The choice is made in words, by the one who knows the task.** The main agent, or you, writes `--permission` on the request. The skill tells the main agent to give the least a task needs and never more than its own conversation has.
+- **A refusal is information, not a dead end.** The result lists what was declined. The main agent can raise the option and continue the same conversation, or ask you first.
+- **What it gives up.** Nothing in code ties a delegate to the conversation's permission mode. A conversation in plan mode can still start a delegate that edits files, if the main agent writes an option that allows it. And a delegate that needs one approval to finish cannot get it mid-turn: it takes another turn.
 
-Every `follow` call marks the job as watched. A job that nothing has followed for 120 seconds interrupts its delegate and ends as cancelled.
+### `wait` is driven by activity, not by a clock
+
+The subagent's model can only act when a tool call returns, so the delegate cannot push a message to it. The nearest thing is a call that blocks until there is news. `wait` does that: the script watches the job log (cheap, no model involved) and returns only when the delegate has done something, when it has ended, or after 90 seconds of silence. A delegate that thinks quietly for five minutes costs three or four calls. A busy one costs at most one call per settle window.
+
+### A job needs someone waiting on it
+
+Every `wait` call marks the job as watched. A job that nothing has waited on for 120 seconds interrupts its delegate and ends as cancelled.
 
 - **Why.** The delegate runs in its own process, so interrupting the subagent, or closing Claude Code, would otherwise leave Codex or agy working, and possibly editing files, with nobody reading the result.
-- **Why a lease and not a signal.** Nothing tells the script that the subagent was interrupted. The absence of `follow` calls is the only evidence there is.
+- **Why a lease and not a signal.** Nothing tells the script that the subagent was interrupted. The absence of `wait` calls is the only evidence there is.
 - **The trade-off.** A delegate keeps running for up to two minutes after its subagent stops. Set `DELEGATE_LEASE_SEC` to change the window, or to `0` to turn it off. The conversation is kept either way and can be continued with `--resume`.
-- **Sleep does not count.** While the machine is asleep the follower is frozen too. A job that notices it has been suspended starts a fresh window instead of stopping at once.
+- **Sleep does not count.** While the machine is asleep whatever waits on the job is frozen too. A job that notices it has been suspended starts a fresh window instead of stopping at once.
 
 ## Permission model
 
-A delegate turn runs in one of Claude Code's own permission modes. The mode is decided when the turn starts:
+A delegate turn runs under one permission option, and the option is the backend's own. It is written on the first line of the request:
 
-1. `--permission-mode <mode>` on the task, if there is one. It overrides everything else. If it allows more than the conversation's mode, Claude Code asks you to approve it first.
-2. Otherwise, the mode the Claude Code conversation is in at that moment.
-3. Otherwise (a task started outside Claude Code, for instance), `default`.
+```text
+--permission ask-for-approval
+Fix the off-by-one in src/paging.ts and run the tests.
+```
 
-A mode says what the delegate may do without asking. When it wants more, it asks, and the request comes to you, as it would from any subagent. The three vendors cut permissions differently, so a mode does not mean the same thing on each backend:
+Nothing is translated from Claude Code's permission modes, and nothing is inherited from the conversation. What a delegate may do is what the request says.
 
-| Mode | Codex | Antigravity |
+**Codex** (`codex app-server`)
+
+| `--permission` | Codex's name | Sandbox | When it asks |
+|---|---|---|---|
+| `read-only` (when left out) | Read Only | Cannot write, no network. Commands that only read still run. | Before anything more. |
+| `ask-for-approval` | Ask for approval | Can write to the workspace and temp directories. No network. | Before stepping outside the sandbox. |
+| `approve-for-me` | Approve for me | The same. | The same, but its own automatic reviewer answers. |
+| `full-access` | Full Access | None. Network included. | Never. |
+
+`--sandbox disabled` takes the sandbox away from an option. `--sandbox enabled` with `full-access` keeps the workspace sandbox while Codex asks nothing, so a step the sandbox stops simply fails.
+
+**Antigravity** (`agy acp`)
+
+| `--permission` | What agy does without asking | What it asks about |
 |---|---|---|
-| `plan` | Its "Read Only": a read-only sandbox with no network. Commands that only read still run. It asks the user before a command that needs more. File edits are refused. | Its own plan mode: it researches, and writes a plan into its own data directory, outside the workspace. It asks the user before a command, and before reading outside the workspace. Edits are refused. |
-| `default` | Its "Read Only", as above. It asks the user before an edit or a command that needs more. | It asks the user before every edit and every command. |
-| `dontAsk` | The same sandbox, and nothing is asked: what the sandbox does not allow fails. | Reads and searches inside the workspace. Everything it asks about is refused. |
-| `acceptEdits` | Its "Ask for approval": it edits files and runs commands inside a sandbox that can write only to the workspace and temp directories and has no network. It asks the user before stepping outside the sandbox or onto the network. | It edits files in the workspace. It asks the user before every command, and before touching anything outside the workspace. |
-| `auto` | Its "Approve for me": as `acceptEdits`, but its own automatic reviewer answers its requests, not the user. | It edits files and runs commands inside its own sandbox. It asks the user about what it judges risky, and before leaving the sandbox. |
-| `bypassPermissions` | Its "Full Access": no sandbox. It can edit any file your account can and use the network, and asks nothing. | Its `--dangerously-skip-permissions`, which its desktop app calls Turbo: it runs everything without asking, inside the workspace or not. |
+| `default` (when left out) | Reads and searches. | Every edit and every command. |
+| `plan` | Researches, and writes a plan into its own data directory. | Edits and commands. |
+| `accept-edits` | Edits files in the workspace. | Every command, and anything outside the workspace. |
+| `auto` | Edits files and runs commands. | What it judges risky. |
+| `skip-permissions` | Everything. It is started with `--dangerously-skip-permissions`. | Nothing. |
 
-### How a request reaches you
+`--sandbox enabled` starts agy with its own `--sandbox` flag, which restricts what its terminal can do.
 
-1. The delegate asks its own backend for permission, and the job holds the request without answering.
-2. `follow` returns at once and shows the forwarding subagent what the delegate wants.
-3. The subagent runs `companion.mjs answer <job> <request> allow`.
-4. The plugin's hook turns that command into a question: Claude Code shows you what the delegate asked for, in the words of the job's own record.
-5. If you approve, the command runs and the delegate goes ahead. If you refuse, the subagent records a refusal and the delegate is told no.
+### Nobody approves a request mid-turn
 
-You have three answers, not two. Besides yes and no, you can refuse and say what to do instead, wherever Claude Code's dialog lets you add a reply to a refusal. The subagent passes your words on with the refusal:
+When a delegate asks for something its option does not allow, the answer is no. There is no dialog and nobody is asked.
 
-- **Codex** gets them as a message into the turn it is running, and carries on from there. If that turn has just ended, they are sent as a turn of their own.
-- **agy** takes no message with a refusal, and a refusal usually ends its turn. So the job sends your words as the next message of the same conversation, and agy carries on.
+- **Codex** records the step as declined, carries on, and says in its answer what it could not do.
+- **agy** tends to stop at a declined request without a word. When that happens the job tells it that nobody can approve and asks it to finish what it can, up to twice in one turn.
+- One kind of request is allowed: agy reading or searching inside the workspace.
+- With `skip-permissions` agy is not meant to ask at all. If it asks anyway, the answer is yes, once.
 
-Things to know:
+The result lists what was declined, and says which option the turn ran with:
 
-- **The approval is yours, not the subagent's.** An `allow` counts only with a mark the hook attaches after you have been asked, and the hook throws away any mark the subagent supplies. So while the hook runs, nothing is approved without your click. The request is shown to you as the job recorded it. A very long one is cut, and then says how much is missing.
-- **That guarantee depends on the hook.** The mark is a file on this machine, readable by anything running as you, the subagent included. With the hook switched off, a subagent that went looking for it could approve its own request. An honest subagent cannot approve anything then, because it never has the mark. Keep the plugin's hook enabled.
-- **A request waits for you, up to 30 minutes.** After that it counts as refused. Set `DELEGATE_APPROVAL_WAIT_SEC` to change the wait. A job that is waiting for your answer is not stopped by the lease.
-- **Where nobody can answer, the answer is no.** That covers non-interactive runs and conversations in `dontAsk` mode.
-- **One question at a time.** Each one costs a round trip through the subagent's model and a click from you. In `default` mode a busy delegate asks often, as Claude does.
+```text
+[delegate] Codex Agent (gpt-6.2-astra xHigh) · completed · 17.1s · read-only · task-abc123
+session: 01a1f822-b94d-7cd3-b925-ce82e6ebc1fc
+declined (1):
+- [command] /bin/zsh -lc 'printf %s world > b.txt' (declined)
+note: nobody can approve a request while a delegate runs, so these were declined. ...
 
-### How each backend enforces a mode
+I couldn't create b.txt because write permission was denied.
+```
 
-- **Codex** is governed by its OS sandbox (`read-only`, `workspace-write` or `danger-full-access`), which decides what it does without asking. Each mode is one of the presets in Codex's own `/permissions` menu. Its approval requests go to you, except in `auto`, which sets the same three values as `codex --approve-for-me` (`workspace-write`, approval policy `on-request`, `approvalsReviewer: auto_review`), and in `dontAsk` and `bypassPermissions`, where it never asks. The sandbox is sent with every turn, so a mode means the same thing whatever your own Codex config says, and a continued conversation takes the mode of the current turn.
-- **agy** is governed by its session mode, which decides what it does without asking. The session mode is agy's own counterpart of the Claude Code mode: `plan`, `default` (also for `dontAsk`), `accept-edits` or `auto`. Its requests go to you, with two exceptions: reading and searching inside the workspace is always allowed, and in `dontAsk` everything else is refused. `bypassPermissions` is different again: agy is started with `--dangerously-skip-permissions`, so it does not ask at all.
+### Raising the option
 
-Before relying on a mode:
+To let a delegate do what was declined, continue the same conversation with another `--permission`. The delegate still has the whole conversation, so "try again" is enough. Each turn names its own option. A turn that names none keeps what the last turn had.
+
+Who decides to raise it:
+
+- **Claude**, when the task plainly needs it and Claude's own conversation is allowed the same thing. The skill tells it to give a delegate the least a task needs and never more than the conversation has: only reading in plan mode, and `approve-for-me`, `full-access`, `skip-permissions` or `--sandbox disabled` only when you asked for them or the conversation itself runs with permissions bypassed.
+- **You**, in every other case. Claude tells you what was declined and which option would allow it.
+
+This is guidance to a model, not a check in code. See [Design decisions](#permissions-are-the-backends-own-and-nobody-approves-mid-turn).
+
+### Before relying on an option
 
 - **`plan` is not "writes nothing".** agy keeps its plan in its own data directory, and does not ask before writing it. The workspace is left alone.
-- **`acceptEdits` is uneven.** Codex runs commands inside its sandbox without asking. agy asks before every command.
-- **`auto` trusts the backend's own judgement.** Codex's reviewer can approve a step outside the workspace: in testing it approved a write and an `rm -rf` outside the workspace that the task had asked for. agy ran `rm` on a workspace file without asking.
-- **`bypassPermissions` means what it says.** Neither backend is confined: Codex runs with no sandbox, and agy runs with its permission checks switched off. Both can touch anything your account can, with nobody approving each step. A delegate follows the conversation into this mode like any other, so a conversation in `bypassPermissions` delegates at `bypassPermissions`.
-- **Codex has no network below `auto`**, unless you approve a request for it. Commands such as `npm install` ask first.
-- **A refusal usually ends an agy turn.** When one of its requests is refused, agy tends to stop without a final message. Codex carries on and reports what it could not do.
+- **agy runs no commands below `auto`.** In `default`, `plan` and `accept-edits` it asks before each one, and nobody answers. So it cannot run `git diff` or a test there. For a review of uncommitted work, the diff has to be in the brief.
+- **`approve-for-me` and `auto` trust the backend's own judgement.** Codex's reviewer can approve a step outside the workspace: in testing it approved a write and an `rm -rf` outside the workspace that the task had asked for. agy ran `rm` on a workspace file without asking.
+- **`full-access` and `skip-permissions` mean what they say.** Neither backend is confined. Both can touch anything your account can, with nobody approving each step.
+- **Codex has no network inside its sandbox.** Commands such as `npm install` are declined below `full-access`, unless its reviewer lets them through under `approve-for-me`.
+- **The sandbox is sent with every Codex turn**, so an option means the same thing whatever your own Codex config says, and a continued conversation takes the option of the current turn.
 
 Before a turn that can edit, make sure the delegate's files do not overlap with files Claude is editing.
-
-### What the hook does
-
-The plugin registers a `PreToolUse` hook on Bash ([hooks.json](plugins/delegate/hooks/hooks.json)). Claude Code hands every hook the conversation's current permission mode. The hook acts on two commands only, both of this plugin's own `companion.mjs`: the one that starts a task, and the one that approves a request. Every other Bash call passes through unchanged.
-
-For the command that starts a task:
-
-- **It passes the mode on.** It adds `--conversation-mode <mode>` to the command, and the script uses that mode when the task has no `--permission-mode` of its own. Because the hook runs on every turn, a follow-up turn picks up a mode you changed in between. A `--conversation-mode` that was already on the command is thrown away, so only the hook can say what mode the conversation is in.
-- **It asks you before a step up.** The forwarding subagent reads another model's output, and that output can contain instructions. If the task names a mode that allows more than the conversation's, the hook has Claude Code ask you to approve the command. A mode that allows the same or less goes through without a question.
-- **It refuses a command whose text the shell might run.** The task text travels in a heredoc. The hook refuses the command if a line of the text is exactly the heredoc's closing marker, if the marker is not quoted, or if the first line holds anything but flags and plain values. The refusal tells the subagent what to correct.
-- **It refuses a command it cannot check.** The script has to be named by its full path, as the first thing in the command. A command that reaches it some other way, after a `cd` or by a relative path, is refused.
-
-For the command that approves a request, it has Claude Code ask you, as described above, and marks the command so that the script can tell the approval came through the hook.
-
-The hook never approves anything by itself: a command it lets through still goes to Claude Code's normal permission check.
 
 ## Layout
 
 ```text
 plugins/delegate/
-├── agents/            codex.md, agy.md: thin subagents that only forward
+├── agents/            codex.md, agy.md: thin subagents that only pass requests on
 ├── commands/          run, status, result, cancel, models, setup
-├── hooks/             hooks.json: passes the conversation's permission mode to a task
-├── skills/            delegating-tasks: when to delegate, how to brief, how to handle results
+├── skills/            delegating-tasks: when to delegate, how to brief, what to permit, how to handle results
 └── scripts/
     ├── companion.mjs  single entry point
-    ├── permission-hook.mjs  the PreToolUse hook
     └── lib/
-        ├── hook.mjs       what the hook decides about a command
+        ├── args.mjs       command-line options, and the options at the top of a request
         ├── abort.mjs      the grace period after a cancel
-        ├── pacing.mjs     how often `follow` hands back a batch of progress
-        ├── progress.mjs   the compact view of the job log that `follow` shows
-        ├── permission.mjs the permission modes, and which one a turn runs in
+        ├── pacing.mjs     how often `wait` comes back with news
+        ├── progress.mjs   the one-line account of what a delegate did last
         ├── rpc.mjs        JSON-RPC client over a child process's stdio, shared by both backends
         ├── state.mjs      job records (one JSON file per job)
         ├── render.mjs     output formatting
@@ -317,7 +352,7 @@ plugins/delegate/
         └── backends/      codex.mjs, agy.mjs, index.mjs, and shared.mjs for what both do alike
 ```
 
-Job records live in the system temp directory, under `delegate-plugin/`, in one directory per repository (all its worktrees share it). Set `DELEGATE_STATE_DIR` to keep them somewhere else. Claude Code's `CLAUDE_PLUGIN_DATA` directory is not used, because Claude Code gives it to hooks but not to shell commands, and the hook and the job have to look in the same place.
+Job records live in the system temp directory, under `delegate-plugin/`, in one directory per repository (all its worktrees share it). Set `DELEGATE_STATE_DIR` to keep them somewhere else.
 
 ## Tests
 
@@ -325,32 +360,36 @@ Job records live in the system temp directory, under `delegate-plugin/`, in one 
 node --test
 ```
 
-The tests in `tests/` cover the hook's decisions and the command line, against job records written to a temporary directory. They start no backend, so they need neither CLI. The behaviour of the backends themselves was checked by hand, by running real tasks.
+The tests in `tests/` cover the command line, against job records written to a temporary directory, and the Codex backend, against a stand-in for `codex app-server`. They need neither CLI. The behaviour of the real backends was checked by hand, by running real tasks.
 
 ## Adding a backend
 
-Create a file in `scripts/lib/backends/`, implement three methods, and register it in `index.mjs`:
+Create a file in `scripts/lib/backends/`, give it the following, and register it in `index.mjs`:
 
+- `permissions`, an object keyed by the names `--permission` takes for this backend, and `defaultPermission`, the one used when none is given. Use the agent's own names for them.
+- `settingsFor({ permission, sandbox })` checks a choice and returns `{ permission, sandbox, settings }` with the names in their proper form. It throws on an option the backend does not have.
 - `check()` returns whether the CLI is installed, its version, and its login state.
 - `listModels({ cwd })` returns `{ models, defaultModel, defaultEffort, note }`, where each model is `{ id, name, efforts }`.
-- `run({ cwd, prompt, permissionMode, model, effort, resumeSessionId, signal, onEvent, askUser })` runs one turn in the given permission mode (the backend decides what each mode means for it) and returns `{ status, sessionId, model, text, actions, usage, error }`. When the agent asks for a permission that the mode leaves to the user, the backend awaits `askUser({ summary, detail })`, which resolves to `"allow"` or `"deny"`. When `signal` aborts, it must interrupt the running turn, and return within the grace period even if the agent never confirms (`afterAbort` in `lib/abort.mjs`).
+- `run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, onEvent })` runs one turn and returns `{ status, sessionId, model, text, actions, usage, error }`. When the agent asks for approval, the backend declines and makes sure the declined step is among `actions`, with `status: "declined"` or `permission: "denied"`. When `signal` aborts, it must interrupt the running turn, and return within the grace period even if the agent never confirms (`afterAbort` in `lib/abort.mjs`).
 
-`backends/shared.mjs` has the pieces that do not depend on the agent: how the plugin introduces itself, how to refuse a request it cannot answer, the shape of the token counts, and the wording of a user's reply to a refusal.
+`backends/shared.mjs` has the pieces that do not depend on the agent: how the plugin introduces itself, how to refuse a request it cannot answer, the shape of the token counts, and the checks on `--permission` and `--sandbox`.
 
 Then add `agents/<name>.md` so Claude can call it as a subagent.
 
 ## Known limitations
 
 - Jobs are not scoped to a Claude session. Every session in the same repository sees the same list.
-- Outside `bypassPermissions`, Codex cannot commit inside a worktree, because its sandbox does not include the main repository's `.git` directory.
+- Nothing in code holds a delegate to the conversation's permission mode. A delegate gets the option written on its request, and keeping that within what the conversation allows is left to Claude's judgement and yours.
+- A delegate cannot be approved mid-turn. What needs approval is declined, and letting it through takes another turn with a higher option.
+- Messages and answers are exchanged as files in the session's scratchpad directory, which exists only inside Claude Code. A task started by hand prints its answer.
+- An answer reaches Claude only when Claude reads its file. A result that is passed on unread says nothing but where the answer is.
+- agy runs a slow command in the background and ends its turn before the command has finished. The job waits for it to carry on, and gives up on a command that shows no sign of life for 30 minutes (`DELEGATE_AGY_BACKGROUND_WAIT_SEC`), so a server that agy leaves running holds the job open that long.
+- Below `full-access`, Codex cannot commit inside a worktree, because its sandbox does not include the main repository's `.git` directory.
 - After its subagent is interrupted, a delegate keeps running for up to two minutes before the lease stops it. Use `/delegate:cancel` to stop it at once.
 - Job records live in the system temp directory, which the system clears from time to time.
 - The busy-conversation check is not atomic. Two resumes of the same conversation started within the same few milliseconds can both get through.
-- In `dontAsk` mode, agy cannot run any command, so it investigates less well than Codex.
-- When one of agy's requests is refused, it usually ends the turn without a final message. The result then shows the refused action and a note, and nothing else.
-- Approving a request has only been tested by answering on the user's behalf from a test, and in a non-interactive session where the answer is always no. Clicking "allow" in Claude Code's own dialog is the one step that could not be exercised.
-- The permission hook starts a Node process before every Bash call in the session, not only the delegate's. It exits at once for commands that are not a delegate task.
-- If the hook does not run (the plugin's hooks are disabled, for instance), tasks without `--permission-mode` run in `default` mode, a task can name any mode without you being asked, and the forwarding subagent has no proper way to approve a request, so requests are refused.
+- In `default`, agy cannot run any command, so it investigates less well than Codex does in `read-only`.
+- agy's `--sandbox` flag is passed on as it is. What exactly it restricts was not tested.
 - agy has no login-status command. `/delegate:setup` treats a successful `agy models` call as proof of login, which has not been tested against a logged-out agy.
 - If Codex gives its final answer and then never reports the turn as finished, the job takes the turn as finished 1.5 seconds later, provided none of Codex's own agents is still at work.
 - `codex app-server` is marked experimental upstream and its protocol may change between versions. This plugin was tested with codex-cli 0.170.0 and agy 1.5.12.

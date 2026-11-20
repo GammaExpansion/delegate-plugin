@@ -7,25 +7,13 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { CONVERSATION_MODE_FLAG, TOKEN_FLAG, parseArgs } from "./lib/args.mjs";
+import { parseArgs, takeLeadingOptions } from "./lib/args.mjs";
 import { BACKENDS, getBackend } from "./lib/backends/index.mjs";
 import { DEFAULT_MAX_WAIT_SEC, settleWindowMs } from "./lib/pacing.mjs";
-import { FALLBACK_MODE, MODES, resolvePermissionMode } from "./lib/permission.mjs";
-import { compactLog } from "./lib/progress.mjs";
-import {
-  renderJobDetail,
-  agentOf,
-  renderAnswer,
-  renderModels,
-  renderPending,
-  renderResult,
-  renderSetup,
-  renderStarted,
-  renderStatusList
-} from "./lib/render.mjs";
+import { statusLine } from "./lib/progress.mjs";
+import { renderAnswer, renderJobDetail, renderModels, renderResult, renderRunning, renderSetup, renderStatusList } from "./lib/render.mjs";
 import {
   appendLog,
-  createSecret,
   finishJob,
   getJob,
   isActive,
@@ -38,14 +26,13 @@ import {
   logSize,
   newJobId,
   pruneJobs,
+  readCursor,
   readJob,
   readLogFrom,
   readLogTail,
-  readSecret,
-  takeAnswer,
   touchHeartbeat,
   updateJob,
-  writeAnswer,
+  writeCursor,
   writeJob
 } from "./lib/state.mjs";
 import { oneLine } from "./lib/text.mjs";
@@ -53,19 +40,36 @@ import { oneLine } from "./lib/text.mjs";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const CANCEL_WAIT_MS = 15_000;
 const WORKER_REGISTER_WAIT_MS = 5_000;
-// A job stops itself when nothing has followed it for this long, so that a delegate
+// A job stops itself when nothing has waited on it for this long, so that a delegate
 // does not keep working after the subagent watching it was interrupted.
 const DEFAULT_LEASE_SEC = 120;
 const LEASE_TICK_MS = 2000;
-// How long a job waits for the user to answer a permission request before it takes the
-// silence as a no.
-const DEFAULT_APPROVAL_WAIT_SEC = 30 * 60;
+// The options a request may carry at its top, written by whoever composed it.
+const REQUEST_OPTIONS = ["permission", "sandbox", "model", "effort", "brief-file"];
 
-const MAX_REPLY_CHARS = 4000;
+function readTextFile(file, what) {
+  try {
+    return fs.readFileSync(file, "utf8").trim();
+  } catch (error) {
+    throw new Error(`Could not read ${what} ${file}: ${error.code ?? error.message}.`);
+  }
+}
 
-function approvalWaitSeconds() {
-  const value = Number(process.env.DELEGATE_APPROVAL_WAIT_SEC);
-  return Number.isFinite(value) && value > 0 ? value : DEFAULT_APPROVAL_WAIT_SEC;
+/**
+ * Save a job's answer where its caller left the message, and return the file's path. A
+ * caller that hands the message over in a file gets the answer back the same way, so
+ * that neither has to pass through a model that would retype it: only the path does.
+ * Returns null when there is no such place or no answer, and the answer is then printed.
+ */
+function saveAnswer(job, text) {
+  if (!job.exchangeDir || !String(text ?? "").trim()) return null;
+  const file = path.join(job.exchangeDir, `${job.id}.md`);
+  try {
+    fs.writeFileSync(file, `${text.trimEnd()}\n`, "utf8");
+    return file;
+  } catch {
+    return null;
+  }
 }
 
 function leaseSeconds() {
@@ -139,7 +143,7 @@ function matchJob(jobs, reference) {
 /**
  * The job a reference means, and the directory to reach its records through. A job of
  * this workspace is found by id or by a unique start of one. A job started somewhere
- * else is found by its full id, so that it can be followed and answered from anywhere.
+ * else is found by its full id, so that it can be waited on from anywhere.
  */
 function findJob(cwd, reference) {
   const here = getJob(cwd, reference) ?? matchJob(listJobs(cwd), reference);
@@ -173,105 +177,33 @@ async function runJob(cwd, id) {
     : null;
 
   const leaseSec = leaseSeconds();
-  // The lease counts from the latest of: the job starting, the last `follow`, and this
+  // The lease counts from the latest of: the job starting, the last `wait`, and this
   // process waking up after having been suspended.
   let leaseFloorMs = Date.now();
   let lastTickMs = leaseFloorMs;
-  let waitingForUser = false;
   const leaseTimer =
     leaseSec > 0
       ? setInterval(() => {
           const now = Date.now();
-          // While the job waits for the user's answer, nothing follows it and nothing has
-          // to: the delegate is standing still. The lease starts over once they answer.
-          if (waitingForUser) {
-            leaseFloorMs = now;
-            lastTickMs = now;
-            return;
-          }
           // A tick that arrives far too late means the machine was asleep (or the process
-          // was stopped). The follower was frozen too, so the silence proves nothing:
+          // was stopped). Whoever waits on it was frozen too, so the silence proves nothing:
           // give it a full window to come back.
           if (now - lastTickMs > LEASE_TICK_MS * 5) leaseFloorMs = now;
           lastTickMs = now;
           const lastSeen = Math.max(leaseFloorMs, lastHeartbeatMs(cwd, id) ?? 0);
           if (controller.signal.aborted || now - lastSeen <= leaseSec * 1000) return;
-          stopError ??= `Stopped because nothing followed the job for ${leaseSec}s. The subagent watching it was probably interrupted.`;
-          appendLog(cwd, id, `nothing has followed this job for ${leaseSec}s; stopping it`);
+          stopError ??= `Stopped because nothing waited on the job for ${leaseSec}s. The subagent watching it was probably interrupted.`;
+          appendLog(cwd, id, `nothing has waited on this job for ${leaseSec}s; stopping it`);
           controller.abort();
         }, LEASE_TICK_MS)
       : null;
   leaseTimer?.unref();
 
-  updateJob(cwd, id, { status: "running", pid: process.pid, startedAt: nowIso(), pending: null });
-  createSecret(cwd, id);
-  const permissionMode = job.permissionMode ?? FALLBACK_MODE;
-
-  // A backend that needs the user's permission calls askUser and waits. The request is
-  // recorded on the job, `follow` shows it, and `answer` delivers the reply. Requests
-  // are put to the user one at a time, in the order they came.
-  let requestCount = 0;
-  let lastRequest = Promise.resolve();
-  const waitForAnswer = async (request) => {
-    if (controller.signal.aborted) return { decision: "deny", message: null };
-    const requestId = `req-${(requestCount += 1)}`;
-    takeAnswer(cwd, id); // An answer left over from an earlier request is not for this one.
-    // Recorded first, logged second. In the other order a follower could read the log
-    // line, miss the request, and then sit out its whole wait before seeing it.
-    updateJob(cwd, id, {
-      pending: { id: requestId, label: backend.agentName, ...request, askedAt: nowIso(), logOffset: logSize(cwd, id) }
-    });
-    appendLog(cwd, id, `waiting for the user · ${requestId}: ${backend.agentName} asks to ${request.summary}`);
-    waitingForUser = true;
-    const waitSec = approvalWaitSeconds();
-    const deadline = Date.now() + waitSec * 1000;
-    let decision = "deny";
-    let message = null;
-    let why = "";
-    try {
-      for (;;) {
-        if (controller.signal.aborted) {
-          why = "the job was stopped";
-          break;
-        }
-        const answer = takeAnswer(cwd, id);
-        if (answer?.request === requestId) {
-          decision = answer.decision === "allow" ? "allow" : "deny";
-          // A "deny" is also what gets recorded when nobody could be asked at all.
-          why = decision === "allow" ? "approved by the user" : "the answer was no";
-          // A refusal can come with the user's own words on what to do instead.
-          if (decision === "deny" && typeof answer.message === "string" && answer.message.trim()) {
-            message = answer.message.trim();
-          }
-          break;
-        }
-        if (Date.now() > deadline) {
-          why = `nobody answered within ${waitSec}s`;
-          break;
-        }
-        await sleep(300);
-      }
-    } finally {
-      waitingForUser = false;
-      leaseFloorMs = Date.now();
-      updateJob(cwd, id, { pending: null });
-    }
-    appendLog(
-      cwd,
-      id,
-      `${requestId}: ${decision === "allow" ? "allowed" : "refused"} (${why})${message ? `\nthe user said: ${message}` : ""}`
-    );
-    return { decision, message };
-  };
-  const askUser = (request) => {
-    const answered = lastRequest.then(() => waitForAnswer(request));
-    lastRequest = answered.catch(() => {});
-    return answered;
-  };
+  updateJob(cwd, id, { status: "running", pid: process.pid, startedAt: nowIso() });
   appendLog(
     cwd,
     id,
-    `started ${job.backend} (permission mode ${permissionMode}: ${job.permissionSource ?? "not recorded"})${job.resumeSessionId ? ", resuming session" : ""}`
+    `started ${job.backend} (permission ${job.permission}${job.sandbox ? `, sandbox ${job.sandbox}` : ""})${job.resumeSessionId ? ", resuming session" : ""}`
   );
 
   let result;
@@ -279,16 +211,16 @@ async function runJob(cwd, id) {
     result = await backend.run({
       cwd: job.cwd,
       prompt: job.prompt,
-      permissionMode,
+      permission: job.permission,
+      sandbox: job.sandbox,
       model: job.model,
       effort: job.effort,
       resumeSessionId: job.resumeSessionId,
       signal: controller.signal,
-      askUser,
       onEvent: (event) => {
         if (event.type === "session") {
-          updateJob(cwd, id, { sessionId: event.sessionId, model: event.model ?? job.model ?? null });
-          appendLog(cwd, id, `session ${event.sessionId}${event.model ? ` · model ${event.model}` : ""}`);
+          updateJob(cwd, id, { sessionId: event.sessionId, model: event.model ?? job.model ?? null, shownEffort: event.effort ?? null });
+          appendLog(cwd, id, `session ${event.sessionId}${event.model ? ` · model ${event.model}` : ""}${event.effort ? ` · effort ${event.effort}` : ""}`);
         } else if (event.type === "action") {
           const { kind, title, status, exitCode } = event.action;
           const exit = exitCode !== undefined && exitCode !== null ? ` (exit ${exitCode})` : "";
@@ -325,21 +257,54 @@ async function runJob(cwd, id) {
   appendLog(cwd, id, `finished: ${result.status}${result.error ? ` · ${result.error.split("\n")[0]}` : ""}`);
   return finishJob(
     cwd,
-    { ...latest, sessionId: result.sessionId ?? latest.sessionId ?? null, model: result.model ?? latest.model ?? null },
+    {
+      ...latest,
+      sessionId: result.sessionId ?? latest.sessionId ?? null,
+      model: result.model ?? latest.model ?? null,
+      answerFile: saveAnswer(latest, result.text)
+    },
     result.status,
     { text: result.text, actions: result.actions, usage: result.usage, error: result.error }
   );
 }
 
-async function cmdTask(argv) {
-  const { options, positionals } = parseArgs(argv, {
-    values: ["backend", "permission-mode", CONVERSATION_MODE_FLAG, "model", "effort", "resume", "cwd", "prompt-file", "timeout-sec"]
+/**
+ * Start a turn and wait for its first news.
+ *
+ * The request is the task, with its options written at the top by whoever composed it
+ * (see takeLeadingOptions). Those win over the same options on the command line, which
+ * is for callers that have no request to write them in.
+ *
+ * The request reaches this command in one of four ways. The forwarding subagent uses
+ * --message-file: text of any kind arrives whole that way, where on a command line or in
+ * a heredoc it would have to get past the shell and past Claude Code's checks on shell
+ * commands. That file is the subagent's own scratch copy, so it is removed once read, and
+ * the answer is saved in the same directory (see saveAnswer).
+ */
+async function cmdRun(argv) {
+  const { options: given, positionals } = parseArgs(argv, {
+    values: ["backend", ...REQUEST_OPTIONS, "resume", "cwd", "prompt-file", "message-file", "timeout-sec", "max-wait-sec", "settle-sec"]
   });
-  const cwd = path.resolve(options.cwd ?? process.cwd());
-  const permission = resolvePermissionMode({
-    explicit: options["permission-mode"],
-    conversationMode: options[CONVERSATION_MODE_FLAG]
-  });
+  const cwd = path.resolve(given.cwd ?? process.cwd());
+
+  let text = positionals.join(" ").trim();
+  let exchangeDir = null;
+  if (given["message-file"]) {
+    const file = path.resolve(cwd, given["message-file"]);
+    text = readTextFile(file, "the message file");
+    exchangeDir = path.dirname(file);
+    fs.rmSync(file, { force: true });
+  } else if (given["prompt-file"]) {
+    text = readTextFile(path.resolve(cwd, given["prompt-file"]), "the prompt file");
+  }
+  if (!text) text = (await readStdin()).trim();
+  const { options: written, body } = takeLeadingOptions(text, REQUEST_OPTIONS);
+  const options = { ...given, ...written };
+  // A long brief, or one full of code, can be kept in a file and named at the top of the
+  // request. Whatever else the request says follows it.
+  const brief = options["brief-file"] ? readTextFile(path.resolve(cwd, options["brief-file"]), "the brief file") : "";
+  const prompt = [brief, body].filter(Boolean).join("\n\n");
+  if (!prompt) throw new Error("No task text. Pass it as an argument, in a file, or on stdin.");
 
   const jobs = listJobs(cwd);
   const resume = options.resume ? resolveResume(jobs, options.resume, options.backend) : null;
@@ -349,6 +314,14 @@ async function cmdTask(argv) {
   const backendName = options.backend ?? resume?.backend;
   if (!backendName) throw new Error(`Missing --backend. Choose one of: ${Object.keys(BACKENDS).join(", ")}.`);
   const backend = getBackend(backendName);
+
+  // Each turn says what it may do. A turn that does not say keeps what the conversation's
+  // last turn had, so a conversation can be continued with more, with less, or as it was.
+  const earlier = resume?.job ?? {};
+  const { permission, sandbox } = backend.settingsFor({
+    permission: options.permission ?? earlier.permission,
+    sandbox: options.sandbox ?? (options.permission === undefined ? earlier.sandbox : undefined)
+  });
 
   if (resume) {
     // One turn at a time per session: two writers on one session lose or reject a turn.
@@ -360,12 +333,8 @@ async function cmdTask(argv) {
     }
   }
 
-  let prompt = positionals.join(" ").trim();
-  if (options["prompt-file"]) prompt = fs.readFileSync(path.resolve(options["prompt-file"]), "utf8").trim();
-  if (!prompt) prompt = (await readStdin()).trim();
-  if (!prompt) throw new Error("No task text. Pass it as an argument, with --prompt-file, or on stdin.");
-
   const timeoutSec = parseTimeoutSec(options["timeout-sec"]);
+  const waits = waitOptions(options);
 
   const job = writeJob(cwd, {
     id: newJobId(),
@@ -377,13 +346,14 @@ async function cmdTask(argv) {
     // Code runs the subagent with worktree isolation. The delegate's edits are there.
     worktree: linkedWorktree(cwd),
     prompt,
-    // Decided per turn: a resumed conversation does not keep the mode of its earlier turns.
-    permissionMode: permission.mode,
-    permissionSource: permission.source,
+    // Where the message came from as a file, and so where the answer is to be saved.
+    exchangeDir,
+    permission,
+    sandbox,
     // A resumed session keeps the model and effort it ran with unless told otherwise
     // (agy falls back to its default model on load).
-    model: options.model ?? resume?.job?.model ?? null,
-    effort: options.effort ?? resume?.job?.effort ?? null,
+    model: options.model ?? earlier.model ?? null,
+    effort: options.effort ?? earlier.effort ?? null,
     timeoutSec,
     resumeSessionId: resume?.sessionId ?? null,
     status: "queued",
@@ -396,8 +366,8 @@ async function cmdTask(argv) {
   });
   pruneJobs(cwd, jobs);
 
-  // Every task runs as a detached worker. This command only starts it and returns the
-  // job id; `follow` is how a caller watches it and collects the result.
+  // Every task runs as a detached worker, so that it outlives this command: a call from
+  // Claude Code may last a few minutes at most, and a task may take far longer.
   const out = fs.openSync(logFile(cwd, job.id), "a");
   const child = spawn(process.execPath, [SCRIPT_PATH, "worker", "--cwd", cwd, "--job-id", job.id], {
     cwd,
@@ -406,8 +376,7 @@ async function cmdTask(argv) {
   });
   child.unref();
   fs.closeSync(out);
-  console.log(renderStarted(job));
-  return 0;
+  return reportNews(cwd, job, waits);
 }
 
 async function cmdWorker(argv) {
@@ -443,54 +412,44 @@ function cmdResult(argv) {
   return 0;
 }
 
-/**
- * Report what a job has done since `--offset`, for a caller that relays progress in steps.
- *
- * It returns when there is something to report, not on a timer: as soon as the job has
- * logged new activity it keeps collecting for a short settle window and then returns
- * that batch. With no activity it returns after --max-wait-sec, and it always returns
- * when the job ends. So a quiet delegate costs the caller almost no calls, and a busy
- * one costs at most one call per settle window.
- *
- * The caller is a model that keeps everything it reads, so by default the activity is
- * shown in a compact form (see lib/progress.mjs). --verbose prints the log as written.
- *
- * Output: the new activity, then either a trailer line with the offset for the next
- * call, or, once the job has ended, the line "=== RESULT ===" and the answer. The answer
- * is the short form (renderAnswer): the caller hands it on word for word, so every line
- * in it is paid for three times over. `result` prints the full record.
- * Every call also marks the job as being followed (see the lease in runJob).
- */
-async function cmdFollow(argv) {
-  const { options, positionals } = parseArgs(argv, {
-    booleans: ["verbose"],
-    values: ["cwd", "offset", "max-wait-sec", "settle-sec"]
-  });
-  if (!positionals[0]) throw new Error("follow needs a job id.");
-  const found = findJob(path.resolve(options.cwd ?? process.cwd()), positionals[0]);
-  const cwd = found.home;
-  let job = found.job;
-
+/** --max-wait-sec and --settle-sec, as `run` and `wait` both take them. */
+function waitOptions(options) {
   const nonNegative = (name, fallback) => {
     if (options[name] === undefined) return fallback;
     const value = Number(options[name]);
     if (!Number.isFinite(value) || value < 0) throw new Error(`--${name} must be zero or more.`);
     return value;
   };
-  const offset = nonNegative("offset", 0);
-  if (!Number.isInteger(offset)) throw new Error("--offset must be a whole number.");
-  const maxWaitMs = nonNegative("max-wait-sec", DEFAULT_MAX_WAIT_SEC) * 1000;
-  const settleOverride = nonNegative("settle-sec", null);
+  return { maxWaitMs: nonNegative("max-wait-sec", DEFAULT_MAX_WAIT_SEC) * 1000, settleSec: nonNegative("settle-sec", null) };
+}
 
+/**
+ * Wait until a job has news, then print it. This is all a caller ever reads of a job.
+ *
+ * If the job is over, the output is its answer and nothing else (renderAnswer): the
+ * caller hands it on word for word. If not, the output is three fixed lines
+ * (renderRunning): that it is still running, one line on what it did last, and the
+ * command to run next. The caller decides nothing and keeps nothing between calls: how
+ * far it has been told is kept here, in the job's cursor.
+ *
+ * It returns when there is something to tell, not on a timer: once the job has logged
+ * new activity it keeps collecting for a short settle window and then returns. With no
+ * activity it returns after --max-wait-sec, and it always returns when the job ends. So
+ * a quiet delegate costs the caller almost no calls, and a busy one costs at most one
+ * call per settle window. Every call also marks the job as watched (see the lease in
+ * runJob).
+ */
+async function reportNews(cwd, job, { maxWaitMs, settleSec }) {
+  const offset = readCursor(cwd, job.id);
   const settleMs = () =>
-    settleOverride !== null ? settleOverride * 1000 : settleWindowMs(Date.now() - Date.parse(job.startedAt ?? job.createdAt));
+    settleSec !== null ? settleSec * 1000 : settleWindowMs(Date.now() - Date.parse(job.startedAt ?? job.createdAt));
 
   const startedAt = Date.now();
   let lastBeat = 0;
   let firstNewAt = null;
-  // How far the log has been looked at. It moves past stretches that hold nothing the
-  // caller could report (the job starting, the model thinking), so that those do not
-  // cost the caller a call of its own.
+  // How far the log has been looked at. It moves past stretches that hold nothing worth
+  // telling (the job starting, the model thinking), so that those do not cost the caller
+  // a call of their own.
   let seen = offset;
   for (;;) {
     const now = Date.now();
@@ -499,14 +458,10 @@ async function cmdFollow(argv) {
       lastBeat = now;
     }
     if (!isActive(job)) break;
-    // A question the caller has not been shown yet comes back at once. `logOffset` is
-    // where the log stood when the question was recorded, so a caller that has read no
-    // further than that has not seen it.
-    if (job.pending && offset <= (job.pending.logOffset ?? 0)) break;
     if (firstNewAt === null && logSize(cwd, job.id) > seen) firstNewAt = now;
     if (firstNewAt !== null && now - firstNewAt >= settleMs()) {
       const batch = readLogFrom(cwd, job.id, offset);
-      if (options.verbose || compactLog(batch.text, { cwd: job.cwd })) break;
+      if (statusLine(batch.text, { cwd: job.cwd })) break;
       seen = batch.nextOffset;
       firstNewAt = null;
     }
@@ -515,24 +470,22 @@ async function cmdFollow(argv) {
     job = getJob(cwd, job.id) ?? job;
   }
   touchHeartbeat(cwd, job.id);
-  // The question's own log line is written just after the question is recorded. Wait for
-  // it, so that the offset handed back lies past it and the question is shown only once.
-  for (let tries = 0; job.pending && logSize(cwd, job.id) <= job.pending.logOffset && tries < 40; tries += 1) {
-    await sleep(50);
-  }
 
-  const { text, nextOffset } = readLogFrom(cwd, job.id, offset);
-  const shown = options.verbose ? text.trimEnd() : compactLog(text, { cwd: job.cwd });
-  if (shown) console.log(shown);
-  if (isActive(job)) {
-    const state = job.pending ? "waiting-for-approval" : job.status;
-    console.log(`[follow] state=${state} next-offset=${nextOffset} agent="${agentOf(job)}"`);
-    if (job.pending) console.log(renderPending(job));
+  if (!isActive(job)) {
+    console.log(renderAnswer(job));
     return 0;
   }
-  console.log("=== RESULT ===");
-  console.log(renderAnswer(job));
+  const { text, nextOffset } = readLogFrom(cwd, job.id, offset);
+  writeCursor(cwd, job.id, nextOffset);
+  console.log(renderRunning(job, statusLine(text, { cwd: job.cwd }), `node "${SCRIPT_PATH}" wait ${job.id}`));
   return 0;
+}
+
+async function cmdWait(argv) {
+  const { options, positionals } = parseArgs(argv, { values: ["cwd", "max-wait-sec", "settle-sec"] });
+  if (!positionals[0]) throw new Error("wait needs a job id.");
+  const { job, home } = findJob(path.resolve(options.cwd ?? process.cwd()), positionals[0]);
+  return reportNews(home, job, waitOptions(options));
 }
 
 async function cmdCancel(argv) {
@@ -584,42 +537,6 @@ async function cmdCancel(argv) {
   return 0;
 }
 
-/**
- * Deliver the user's answer to the request a job is waiting on.
- *
- * A "deny" is taken as it comes. An "allow" counts only with the job's secret, which the
- * plugin's hook attaches after Claude Code has put the request to the user. Without the
- * hook there is no way to know the user agreed, so nothing is approved.
- */
-async function cmdAnswer(argv) {
-  const { options, positionals } = parseArgs(argv, { values: ["cwd", TOKEN_FLAG] });
-  const cwd = path.resolve(options.cwd ?? process.cwd());
-  const [reference, requestId, decision] = positionals;
-  if (!reference || !requestId || !["allow", "deny"].includes(decision)) {
-    throw new Error("Usage: answer <job> <request> <allow|deny>");
-  }
-  const { job, home } = findJob(cwd, reference);
-  if (!isActive(job) || job.pending?.id !== requestId) {
-    throw new Error(
-      `Job ${job.id} is not waiting on ${requestId}. The request may already have been answered, or it timed out. Keep following the job.`
-    );
-  }
-  if (decision === "allow") {
-    const secret = readSecret(home, job.id);
-    if (!secret || options[TOKEN_FLAG] !== secret) {
-      throw new Error(
-        "Nothing was approved. An approval has to be confirmed by the user, which happens through the delegate plugin's hook, and this command did not come through it. If the user said no, record that with: answer <job> <request> deny"
-      );
-    }
-  }
-  // With a refusal, whatever is on stdin is the user's reply to the delegate.
-  const message = decision === "deny" ? (await readStdin()).trim().slice(0, MAX_REPLY_CHARS) : "";
-  writeAnswer(home, job.id, { request: requestId, decision, message: message || null, answeredAt: nowIso() });
-  const outcome = decision === "allow" ? "allowed" : message ? "refused, and the user's reply was passed on" : "refused";
-  console.log(`Recorded for ${job.id}: ${requestId} ${outcome}. Keep following the job.`);
-  return 0;
-}
-
 /** List the models each backend offers. One backend failing does not hide the others. */
 async function cmdModels(argv) {
   const { options, positionals } = parseArgs(argv, { booleans: ["json"], values: ["cwd"] });
@@ -652,26 +569,37 @@ function cmdSetup(argv) {
 }
 
 const USAGE = `Usage:
-  companion.mjs task   --backend <${Object.keys(BACKENDS).join("|")}> [--permission-mode <mode>]
-                       [--resume <session-or-job>] [--model <id>] [--effort <level>]
-                       [--timeout-sec <n>] [--cwd <dir>] [task text | --prompt-file <path> | stdin]
-  companion.mjs follow <job> [--offset <n>] [--max-wait-sec <n>] [--settle-sec <n>] [--verbose]
-  companion.mjs answer <job> <request> <allow|deny>     (with deny: the user's reply on stdin, if any)
+  companion.mjs run    --backend <${Object.keys(BACKENDS).join("|")}> [--resume <session-or-job>]
+                       [--permission <option>] [--sandbox <enabled|disabled>] [--model <id>] [--effort <level>]
+                       [--timeout-sec <n>] [--cwd <dir>]
+                       [task text | --prompt-file <path> | --message-file <path> | stdin]
+  companion.mjs wait   <job> [--max-wait-sec <n>] [--settle-sec <n>]
   companion.mjs status [job] [--all] [--json]
   companion.mjs result [job] [--json]
   companion.mjs cancel [job]
   companion.mjs models [backend] [--json]
   companion.mjs setup  [--json]
 
-task starts a detached job and prints its id. follow returns when the job has done
-something new since --offset, or has ended (it then prints the result as well).
-When the delegate needs the user's permission, follow shows the request and answer
-delivers the reply. An unanswered request counts as refused after ${DEFAULT_APPROVAL_WAIT_SEC / 60} minutes.
-A job that nothing follows for ${DEFAULT_LEASE_SEC}s stops itself.
---permission-mode says what the delegate may do this turn: ${MODES.join(", ")}.
-These are Claude Code's modes. Left out, the turn follows the mode of the Claude Code
-conversation it was started from, and is "${FALLBACK_MODE}" (read-only) when started from anywhere else.
---resume takes the session id printed in a result (or a job id) and continues that conversation.`;
+run starts a job and waits for its first news. If the job is over, run prints its
+answer. If not, it prints "[delegate] still running", one line on what the delegate did
+last, and the wait command to run next. wait does the same for a job that is running.
+A job that nothing waits on for ${DEFAULT_LEASE_SEC}s stops itself.
+
+--permission, --sandbox, --model and --effort may also be written at the top of the
+task text, before the task itself. What is written there wins. --brief-file <path>
+there adds the content of a file to the task.
+
+--message-file is how a caller passes the task without retyping it into a command, and
+gets the answer back without retyping it either: the file is read and removed, and the
+answer is saved beside it as <job>.md, with only its path printed.
+
+--permission takes one of the backend's own options:
+${Object.values(BACKENDS)
+  .map((backend) => `  ${backend.name}: ${Object.keys(backend.permissions).join(", ")}   (default ${backend.defaultPermission})`)
+  .join("\n")}
+Nobody can approve a request while a delegate runs: what it asks about is declined and
+listed in the result. --resume continues a conversation, and each turn may name a
+different --permission. Left out, a turn keeps what the conversation's last turn had.`;
 
 async function main() {
   const [command, ...rawArgv] = process.argv.slice(2);
@@ -679,20 +607,18 @@ async function main() {
   // ("task-abc --all"). Only that single-argument form is split. Arguments that arrive
   // already separated are left alone, so that a path with a space in it stays whole.
   const argv =
-    command !== "task" && rawArgv.length === 1 ? rawArgv[0].trim().split(/\s+/).filter(Boolean) : rawArgv;
+    command !== "run" && rawArgv.length === 1 ? rawArgv[0].trim().split(/\s+/).filter(Boolean) : rawArgv;
   switch (command) {
-    case "task":
-      return cmdTask(argv);
+    case "run":
+      return cmdRun(argv);
     case "worker":
       return cmdWorker(argv);
     case "status":
       return cmdStatus(argv);
     case "result":
       return cmdResult(argv);
-    case "follow":
-      return cmdFollow(argv);
-    case "answer":
-      return cmdAnswer(argv);
+    case "wait":
+      return cmdWait(argv);
     case "cancel":
       return cmdCancel(argv);
     case "models":

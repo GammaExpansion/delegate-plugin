@@ -1,7 +1,8 @@
-// The compact view of a stretch of the job log, as `follow` hands it to its caller.
+// A stretch of the job log, boiled down. `wait` tells its caller what the delegate did
+// last in one line (statusLine), made from a compact view of the log (compactLog).
 //
 // The caller is a model that keeps everything it reads and pays for it again on every
-// later call, so the view holds what a one-line progress note can use and nothing else:
+// later call, so the view holds what a progress note can use and nothing else:
 //   - no time stamps, and no entries about the job starting, its session, or its end
 //     (the result that follows says those)
 //   - reasoning ("thinking:") and permission traces are left out
@@ -16,7 +17,7 @@ import fs from "node:fs";
 import { splitLogEntries } from "./state.mjs";
 import { oneLine } from "./text.mjs";
 
-const HOUSEKEEPING = /^(?:started \S+ \(permission mode|session \S+(?: · model |$)|finished: |thinking:|permission request:)/;
+const HOUSEKEEPING = /^(?:started \S+ \(|agy ended its turn with a command still running|session \S+(?: · model |$)|finished: |thinking:|permission request:)/;
 const SHELL_WRAPPER = /^(.*?: )?\/(?:usr\/)?bin\/(?:zsh|bash|sh) -l?c (['"])(.*)\2$/s;
 
 /** `/bin/zsh -lc 'cat x'` -> `cat x`, when taking the quotes off cannot change the meaning. */
@@ -68,4 +69,33 @@ export function compactLog(text, { cwd } = {}) {
     for (const line of rest.slice(-2)) out.push(`  ${oneLine(line, 160)}`);
   }
   return out.join("\n");
+}
+
+// The same step in fewer words, for a line that has to fit beside the agent's name.
+const REWORDED = [
+  [/^running command: (.*)$/s, (m) => `running ${m[1]}`],
+  [/^command (?:completed|failed)(?: \((exit -?\d+)\))?: (.*)$/s, (m) => `ran ${m[2]}${m[1] ? ` (${m[1]})` : ""}`],
+  [/^\S+ declined: (.*)$/s, (m) => `declined: ${m[1]}`],
+  [/^declined \([^)]*\): (.*)$/s, (m) => `declined: ${m[1]}`],
+  [/^starting (\S+): (.*)$/s, (m) => `${m[1]}: ${m[2]}`],
+  [/^message: (.*)$/s, (m) => m[1]]
+];
+
+/**
+ * What the delegate did last in a stretch of the log, as one line, or "" when the
+ * stretch holds nothing worth telling. This is all a follower is shown of the log.
+ * @param {string} text
+ * @param {{ cwd?: string, max?: number }} [options]
+ */
+export function statusLine(text, { cwd, max = 110 } = {}) {
+  const steps = compactLog(text, { cwd })
+    .split("\n")
+    .filter((line) => line && !line.startsWith("  "));
+  const last = steps[steps.length - 1];
+  if (!last) return "";
+  for (const [pattern, reword] of REWORDED) {
+    const match = last.match(pattern);
+    if (match) return oneLine(reword(match), max);
+  }
+  return oneLine(last, max);
 }

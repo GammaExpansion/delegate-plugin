@@ -1,6 +1,6 @@
 ---
 description: Hand a task to Codex or Antigravity and show its answer
-argument-hint: "<codex|agy> [--worktree] [--permission-mode <mode>] [--model <id>] [--effort <level>] <task>"
+argument-hint: "<codex|agy> [--worktree] [--permission <option>] [--sandbox enabled|disabled] [--model <id>] [--effort <level>] <task>"
 allowed-tools: Agent, Bash(node:*)
 ---
 
@@ -23,7 +23,8 @@ Worktree:
 
 What to forward:
 
-- Forward everything after the backend name as the subagent's prompt, flags included. The subagent turns `--permission-mode`, `--model` and `--effort` into runtime options. Do not add a `--permission-mode` the user did not type: without one, the delegate follows this conversation's permission mode.
+- The subagent's prompt is the options on its first line, then the task. Put `--permission`, `--sandbox`, `--model` and `--effort` there as the user typed them.
+- If the user typed no `--permission`, choose one from the task as the `delegating-tasks` skill says: the least the task needs, and never more than this conversation has.
 - If the user means to continue an earlier delegate conversation from this session, do not start a new subagent. Continue the subagent that held that conversation by sending it the new request.
 - The delegate cannot see this conversation. If the task refers to something only this conversation knows ("that bug", "the file we were looking at"), replace the reference with the concrete file paths, error text and goal. Change nothing else about the task.
 - If the user gave no task text, ask what the delegate should do.

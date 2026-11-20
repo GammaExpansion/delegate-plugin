@@ -86,11 +86,10 @@ export function stateDir(cwd) {
 }
 
 /**
- * The directory for one repository's job records. It must come out the same in every
- * process that touches a job: the task command, its worker, `follow`, and the plugin's
- * hook. Claude Code gives hooks a CLAUDE_PLUGIN_DATA directory but does not give it to
- * shell commands, so that variable cannot be used here: the hook would look somewhere
- * the worker never wrote.
+ * The directory all job records live under. It must come out the same in every process
+ * that touches a job: the command that starts it, its worker, and every `wait`. Claude
+ * Code does not give shell commands a plugin data directory, so the system's temp
+ * directory is used.
  */
 function stateBase() {
   return process.env.DELEGATE_STATE_DIR || path.join(os.tmpdir(), "delegate-plugin");
@@ -118,50 +117,28 @@ export function logFile(cwd, id) {
   return path.join(jobsDir(cwd), `${id}.log`);
 }
 
-/** Touched by `follow`; the worker reads it to tell whether anyone is still watching. */
+/** Touched by `wait`; the worker reads it to tell whether anyone is still watching. */
 function heartbeatFile(cwd, id) {
   return path.join(jobsDir(cwd), `${id}.heartbeat`);
 }
 
-const secretFile = (cwd, id) => path.join(jobsDir(cwd), `${id}.secret`);
-const answerFile = (cwd, id) => path.join(jobsDir(cwd), `${id}.answer`);
+/** How far into the job's log its follower has been told about. */
+const cursorFile = (cwd, id) => path.join(jobsDir(cwd), `${id}.cursor`);
 
-/**
- * A job's secret proves that an approval came through the plugin's hook, which is the
- * step where the user is asked. The worker creates it, the hook reads it and attaches it
- * to the approving command, and `answer` checks it. No command prints it.
- */
-export function createSecret(cwd, id) {
-  const secret = crypto.randomBytes(16).toString("hex");
-  fs.writeFileSync(secretFile(cwd, id), `${secret}\n`, { encoding: "utf8", mode: 0o600 });
-  return secret;
-}
-
-export function readSecret(cwd, id) {
+export function readCursor(cwd, id) {
   try {
-    return fs.readFileSync(secretFile(cwd, id), "utf8").trim() || null;
+    const value = Number(fs.readFileSync(cursorFile(cwd, id), "utf8").trim());
+    return Number.isInteger(value) && value >= 0 ? value : 0;
   } catch {
-    return null;
+    return 0;
   }
 }
 
-/** The user's answer to a pending request, left for the worker to pick up. */
-export function writeAnswer(cwd, id, answer) {
-  const file = answerFile(cwd, id);
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(answer)}\n`, "utf8");
-  fs.renameSync(tmp, file);
-}
-
-/** Read the waiting answer, if any, and remove it. */
-export function takeAnswer(cwd, id) {
-  const file = answerFile(cwd, id);
+export function writeCursor(cwd, id, offset) {
   try {
-    const answer = JSON.parse(fs.readFileSync(file, "utf8"));
-    fs.rmSync(file, { force: true });
-    return answer;
+    fs.writeFileSync(cursorFile(cwd, id), `${offset}\n`, "utf8");
   } catch {
-    return null;
+    // Best effort: the worst case is that some activity is described twice.
   }
 }
 
@@ -300,9 +277,9 @@ function reconcile(cwd, job) {
   });
 }
 
-/** Record how a job ended. Whatever it was waiting on is over too. */
+/** Record how a job ended. */
 export function finishJob(cwd, job, status, result) {
-  return writeJob(cwd, { ...job, status, finishedAt: new Date().toISOString(), pending: null, result });
+  return writeJob(cwd, { ...job, status, finishedAt: new Date().toISOString(), result });
 }
 
 /** Newest first. */
@@ -356,7 +333,9 @@ export function locateJob(id) {
 export function pruneJobs(cwd, jobs = listJobs(cwd)) {
   const finished = jobs.filter((job) => !isActive(job));
   for (const job of finished.slice(MAX_JOBS)) {
-    const files = [jobFile, logFile, heartbeatFile, secretFile, answerFile].map((fileOf) => fileOf(cwd, job.id));
+    const files = [jobFile, logFile, heartbeatFile, cursorFile].map((fileOf) => fileOf(cwd, job.id));
+    // The answer saved for the job's caller goes with the record, if it is still there.
+    if (job.answerFile) files.push(job.answerFile);
     for (const file of files) {
       try {
         fs.rmSync(file, { force: true });

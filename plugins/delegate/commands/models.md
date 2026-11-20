@@ -7,4 +7,4 @@ allowed-tools: Bash(node:*)
 
 !`node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" models "$ARGUMENTS"`
 
-Show the output to the user unchanged, in a code block. The ids in the first column are what `--model` accepts.
+Show the output to the user unchanged, in a code block. It is laid out as tables, so keep its spacing.

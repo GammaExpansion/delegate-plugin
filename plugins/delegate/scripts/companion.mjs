@@ -662,9 +662,9 @@ async function cmdModels(argv) {
   const entries = await Promise.all(
     backends.map(async (backend) => {
       try {
-        return { backend: backend.name, list: await backend.listModels({ cwd }) };
+        return { backend: backend.name, agentName: backend.agentName, list: await backend.listModels({ cwd }) };
       } catch (error) {
-        return { backend: backend.name, error: error?.message ?? String(error) };
+        return { backend: backend.name, agentName: backend.agentName, error: error?.message ?? String(error) };
       }
     })
   );

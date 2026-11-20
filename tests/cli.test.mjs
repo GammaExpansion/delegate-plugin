@@ -217,6 +217,56 @@ test("permission modes: an explicit mode wins, then the conversation's, then def
   assert.ok(!allowsMoreThan("plan", "default"));
 });
 
+test("the models listing groups ids, folds thinking levels and marks the default", async () => {
+  const { renderModels } = await import("../plugins/delegate/scripts/lib/render.mjs");
+  const all = ["low", "medium", "high", "xhigh", "max", "ultra"];
+  const shown = renderModels([
+    {
+      backend: "codex",
+      agentName: "Codex Agent",
+      list: {
+        defaultModel: "gpt-6.2-astra",
+        defaultEffort: "xhigh",
+        note: null,
+        models: [
+          { id: "gpt-5.2", name: "GPT-5.2", efforts: all.slice(0, 4) },
+          { id: "gpt-6.2-sol", name: "GPT-6.2-Sol", efforts: all },
+          { id: "gpt-6.2-astra", name: "GPT-6.2-Astra", efforts: all },
+          { id: "gpt-6", name: "GPT-6 (Astra)", efforts: ["low", "high"] },
+          { id: "gpt-reserve", name: "gpt-reserve", efforts: [] }
+        ]
+      }
+    },
+    {
+      backend: "agy",
+      agentName: "Gemini Agent",
+      list: {
+        defaultModel: null,
+        defaultEffort: null,
+        note: null,
+        models: [
+          { id: "gemini-4-neon-high", name: "Gemini 4 Neon (High)", efforts: [], family: "gemini-4-neon", familyName: "Gemini 4 Neon", level: "high" },
+          { id: "gemini-4-neon-low", name: "Gemini 4 Neon (Low)", efforts: [], family: "gemini-4-neon", familyName: "Gemini 4 Neon", level: "low" },
+          { id: "gemini-pro-orchestrator", name: "Orchestrator (Carbon)", efforts: [] }
+        ]
+      }
+    },
+    { backend: "other", agentName: "Other Agent", error: "not installed" }
+  ]);
+  const lines = shown.split("\n").map((line) => line.trimEnd());
+  // Newest generation first, a gap between generations, and the default marked.
+  const ids = lines.map((line) => line.match(/^  [* ] (gpt-\S+)/)?.[1]).filter(Boolean);
+  assert.deepEqual(ids, ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6", "gpt-5.2", "gpt-reserve"]);
+  assert.ok(lines.includes("  * gpt-6.2-astra   low → ultra"));
+  assert.ok(lines.includes("    gpt-6           low high      GPT-6 (Astra)"), "a name is shown only where it adds to the id");
+  assert.ok(lines.includes("    gpt-reserve     -"));
+  assert.match(shown, /default: gpt-6\.2-astra, effort xhigh/);
+  // One row per model, with its levels in order and the id as a pattern.
+  assert.ok(lines.includes("  Gemini 4 Neon           low high   gemini-4-neon-<level>"));
+  assert.ok(lines.includes("  Orchestrator (Carbon)   -          gemini-pro-orchestrator"));
+  assert.match(shown, /Other Agent \(--backend other\)\n  could not list its models: not installed/);
+});
+
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 
 test("the cancel grace period starts even when the abort came first", async (t) => {

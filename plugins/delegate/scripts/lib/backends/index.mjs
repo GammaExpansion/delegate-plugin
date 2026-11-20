@@ -43,7 +43,9 @@ import { codexBackend } from "./codex.mjs";
  * @property {string | null} error
  *
  * @typedef {object} ModelList
- * @property {{ id: string, name: string, efforts: string[] }[]} models   efforts is empty when the backend lists none
+ * @property {{ id: string, name: string, efforts: string[], family?: string, familyName?: string, level?: string }[]} models
+ *           efforts is empty when the backend lists none. When a backend has one id per
+ *           thinking level, `family`, `familyName` and `level` say which ids go together.
  * @property {string | null} defaultModel    used when --model is left out, if the backend can tell
  * @property {string | null} defaultEffort
  * @property {string | null} note

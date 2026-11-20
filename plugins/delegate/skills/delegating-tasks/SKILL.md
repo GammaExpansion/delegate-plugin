@@ -44,7 +44,7 @@ When the user names a model loosely ("the fast Gemini one", "the newest GPT"), l
 node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" models [codex|agy]
 ```
 
-The first column is the id `--model` accepts. For Codex the list also shows which efforts each model supports and which model is used when `--model` is left out.
+For Codex, `MODEL` is the id `--model` accepts, `EFFORT` the range `--effort` accepts for it, and `*` marks the model used when `--model` is left out. For Antigravity the thinking level is part of the id: the `ID` column shows the pattern, such as `gemini-4-neon-<level>`, and `LEVELS` the levels to put in its place, giving `gemini-4-neon-high`. Add `--json` for the plain list of every id.
 
 ## Permissions
 

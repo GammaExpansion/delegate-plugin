@@ -85,6 +85,17 @@ function toolOutputText(update) {
     .join("\n");
 }
 
+// agy has no separate effort setting in its model list: each thinking level of a model
+// is an id of its own, such as gemini-4-neon-high. The level is the id's last part.
+const LEVEL_IN_ID = /^(.+)-(minimal|low|medium|high|xhigh|max|ultra)$/;
+
+/** Mark a model with the family it belongs to and its level, when its id carries one. */
+function withFamily(model) {
+  const match = model.id.match(LEVEL_IN_ID);
+  if (!match) return model;
+  return { ...model, family: match[1], familyName: model.name.replace(/\s*\([^)]*\)\s*$/, ""), level: match[2] };
+}
+
 /** Runs `agy models`, which prints one "id<TAB>name" line per model. Throws if it cannot. */
 function fetchModels() {
   let output;
@@ -99,7 +110,7 @@ function fetchModels() {
     .split("\n")
     .map((line) => line.split("\t"))
     .filter((parts) => parts.length >= 2 && parts[0].trim())
-    .map(([id, name]) => ({ id: id.trim(), name: name.trim(), efforts: [] }));
+    .map(([id, name]) => withFamily({ id: id.trim(), name: name.trim(), efforts: [] }));
   if (!models.length) throw new Error("`agy models` listed no models.");
   return models;
 }
@@ -149,7 +160,7 @@ export const agyBackend = {
       models: fetchModels(),
       defaultModel: null,
       defaultEffort: null,
-      note: "Each id already includes a thinking level. agy does not report its default model here; every task result names the model it ran on."
+      note: "agy does not say here which model it uses by default. Every task result names the model it ran on."
     };
   },
 

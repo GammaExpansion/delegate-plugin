@@ -136,27 +136,103 @@ export function renderJobDetail(job, logTail) {
   return lines.join("\n");
 }
 
-/** @param {{ backend: string, list?: import("./backends/index.mjs").ModelList, error?: string }[]} entries */
-export function renderModels(entries) {
-  const blocks = entries.map(({ backend, list, error }) => {
-    if (error) return `${backend}: could not list models\n  ${error}`;
-    const header = [`${backend}: ${list.models.length} models`];
-    if (list.defaultModel) {
-      header.push(`default ${list.defaultModel}${list.defaultEffort ? ` (effort ${list.defaultEffort})` : ""}`);
+// Reasoning efforts and thinking levels, weakest first.
+const LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+const byLevel = (a, b) => LEVELS.indexOf(a) - LEVELS.indexOf(b);
+
+/** "low → ultra" for an unbroken run of levels, otherwise the levels one by one. */
+function levelRange(levels) {
+  const sorted = [...levels].sort(byLevel);
+  if (sorted.length < 3) return sorted.join(" ");
+  const places = sorted.map((level) => LEVELS.indexOf(level));
+  const unbroken = places.every((place, i) => place !== -1 && (i === 0 || place === places[i - 1] + 1));
+  return unbroken ? `${sorted[0]} → ${sorted[sorted.length - 1]}` : sorted.join(" ");
+}
+
+/** Rows as a table: columns padded to the widest cell, blank rows kept as gaps. */
+function table(header, rows) {
+  const widths = header.map((_, column) => Math.max(...[header, ...rows.filter(Boolean)].map((row) => row[column].length)));
+  const line = (row) => row.map((cell, column) => cell.padEnd(widths[column])).join("   ").trimEnd();
+  return [line(header), ...rows.map((row) => (row ? line(row) : ""))];
+}
+
+const sameWords = (a, b) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** "gpt-6.2" for gpt-6.2-astra: the ids that share it are listed together. */
+const generationOf = (id) => id.match(/^[a-z]+-\d+(?:\.\d+)?(?=-|$)/)?.[0] ?? null;
+
+/**
+ * Models that each have an id and a list of efforts (Codex). Listed newest generation
+ * first with a gap between generations, and the model's own name only where it says
+ * more than the id does (an alias, for instance).
+ */
+function modelRows(list) {
+  const generations = [];
+  for (const model of list.models) {
+    const key = generationOf(model.id);
+    let group = generations.find((entry) => entry.key === key);
+    if (!group) generations.push((group = { key, models: [] }));
+    group.models.push(model);
+  }
+  const version = (key) => (key ? Number(key.replace(/^[a-z]+-/, "")) : -1);
+  generations.sort((a, b) => version(b.key) - version(a.key));
+
+  const rows = [];
+  for (const group of generations) {
+    if (rows.length) rows.push(null);
+    for (const model of group.models) {
+      rows.push([
+        `${model.id === list.defaultModel ? "*" : " "} ${model.id}`,
+        model.efforts.length ? levelRange(model.efforts) : "-",
+        sameWords(model.name, model.id) ? "" : model.name
+      ]);
     }
-    const idWidth = Math.max(...list.models.map((model) => model.id.length));
-    const nameWidth = Math.max(...list.models.map((model) => model.name.length));
-    const rows = list.models.map((model) => {
-      const mark = model.id === list.defaultModel ? "*" : " ";
-      const efforts = model.efforts.length ? `effort: ${model.efforts.join(" ")}` : "";
-      return `${mark} ${model.id.padEnd(idWidth)}  ${model.name.padEnd(nameWidth)}  ${efforts}`.trimEnd();
-    });
-    const lines = [header.join(" · "), ...rows];
-    if (list.defaultModel) lines.push("* used when --model is left out");
-    if (list.note) lines.push(list.note);
+  }
+  return table(["  MODEL", "EFFORT", "NAME"], rows);
+}
+
+/**
+ * Models whose thinking level is part of the id (agy): one row per model, with its
+ * levels, in place of one row per id.
+ */
+function familyRows(list) {
+  const families = [];
+  for (const model of list.models) {
+    const key = model.family ?? model.id;
+    let family = families.find((entry) => entry.key === key);
+    if (!family) families.push((family = { key, name: model.familyName ?? model.name, levels: [], ids: [] }));
+    if (model.level) family.levels.push(model.level);
+    family.ids.push(model.id);
+  }
+  const rows = families.map((family) => [
+    family.name,
+    family.levels.sort(byLevel).join(" ") || "-",
+    family.levels.length > 1 ? `${family.key}-<level>` : family.ids[0]
+  ]);
+  return table(["MODEL", "LEVELS", "ID"], rows);
+}
+
+/** @param {{ backend: string, agentName?: string, list?: import("./backends/index.mjs").ModelList, error?: string }[]} entries */
+export function renderModels(entries) {
+  const blocks = entries.map(({ backend, agentName, list, error }) => {
+    const title = `${agentName ?? backend} (--backend ${backend})`;
+    if (error) return `${title}\n  could not list its models: ${error}`;
+
+    const hasFamilies = list.models.some((model) => model.family);
+    const lines = [title];
+    if (list.defaultModel) {
+      lines.push(`  default: ${list.defaultModel}${list.defaultEffort ? `, effort ${list.defaultEffort}` : ""}   (marked * below)`);
+    }
+    lines.push("", ...(hasFamilies ? familyRows(list) : modelRows(list)).map((line) => (line ? `  ${line}` : "")), "");
+    lines.push(
+      hasFamilies
+        ? `  ${list.models.length} ids. The thinking level is part of the id, as in --model ${list.models.find((model) => model.family)?.id ?? "<id>"}`
+        : `  ${list.models.length} models. Pick one with --model <id>, and an effort with --effort <level>.`
+    );
+    if (list.note) lines.push(`  ${list.note}`);
     return lines.join("\n");
   });
-  return blocks.join("\n\n");
+  return blocks.join("\n\n\n");
 }
 
 export function renderSetup(report) {

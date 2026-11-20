@@ -24,7 +24,7 @@ Worktree:
 What to forward:
 
 - The subagent's prompt is the options on its first line, then the task. Put `--permission`, `--sandbox`, `--model` and `--effort` there as the user typed them.
-- If the user typed no `--permission`, choose one from the task as the `delegating-tasks` skill says: the least the task needs, and never more than this conversation has.
+- If the user typed no `--permission`, choose the one that matches this conversation's permission mode, as the `delegating-tasks` skill says.
 - If the user means to continue an earlier delegate conversation from this session, do not start a new subagent. Continue the subagent that held that conversation by sending it the new request.
 - The delegate cannot see this conversation. If the task refers to something only this conversation knows ("that bug", "the file we were looking at"), replace the reference with the concrete file paths, error text and goal. Change nothing else about the task.
 - If the user gave no task text, ask what the delegate should do.

@@ -237,7 +237,7 @@ An earlier version did two things differently, and both were removed:
 
 What replaced them:
 
-- **The choice is made in words, by the one who knows the task.** The main agent, or you, writes `--permission` on the request. The skill tells the main agent to give the least a task needs and never more than its own conversation has.
+- **The choice is made in words.** The main agent, or you, writes `--permission` on the request. The skill tells the main agent to pass the option that matches the permission mode its own conversation is in, which it knows, so a delegate gets what the conversation has.
 - **A refusal is information, not a dead end.** The result lists what was declined. The main agent can raise the option and continue the same conversation, or ask you first.
 - **What it gives up.** Nothing in code ties a delegate to the conversation's permission mode. A conversation in plan mode can still start a delegate that edits files, if the main agent writes an option that allows it. And a delegate that needs one approval to finish cannot get it mid-turn: it takes another turn.
 
@@ -309,16 +309,28 @@ note: nobody can approve a request while a delegate runs, so these were declined
 I couldn't create b.txt because write permission was denied.
 ```
 
-### Raising the option
+### Which option a delegate gets
 
-To let a delegate do what was declined, continue the same conversation with another `--permission`. The delegate still has the whole conversation, so "try again" is enough. Each turn names its own option. A turn that names none keeps what the last turn had.
+The plugin does not read the conversation's permission mode. Claude knows which mode its conversation is in, and the skill tells it to pass the option that matches:
 
-Who decides to raise it:
+| The conversation's mode | Codex | Antigravity |
+|---|---|---|
+| plan | `read-only` | `plan` |
+| default (Claude asks before each edit) | `read-only` | `default` |
+| accept edits | `ask-for-approval` | `accept-edits` |
+| auto | `approve-for-me` | `auto` |
+| bypass permissions | `full-access` | `skip-permissions` |
 
-- **Claude**, when the task plainly needs it and Claude's own conversation is allowed the same thing. The skill tells it to give a delegate the least a task needs and never more than the conversation has: only reading in plan mode, and `approve-for-me`, `full-access`, `skip-permissions` or `--sandbox disabled` only when you asked for them or the conversation itself runs with permissions bypassed.
-- **You**, in every other case. Claude tells you what was declined and which option would allow it.
+- An option you name yourself comes first.
+- If Claude cannot tell which mode it is in, it gives the least the task needs.
 
 This is guidance to a model, not a check in code. See [Design decisions](#permissions-are-the-backends-own-and-nobody-approves-mid-turn).
+
+### Raising the option
+
+To let a delegate do what was declined, the same conversation is continued with another `--permission`. The delegate still has the whole conversation, so "try again" is enough. Each turn names its own option. A turn that names none keeps what the last turn had.
+
+A delegate starts with what the conversation has, so Claude does not raise the option on its own. It tells you what was declined and which option would allow it, and continues once you agree or once you have changed the conversation's mode.
 
 ### Before relying on an option
 

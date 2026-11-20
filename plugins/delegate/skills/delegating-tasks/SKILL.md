@@ -35,7 +35,7 @@ For a model id, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" models [
 
 ## Permissions
 
-The options are each backend's own. Nothing is taken from this conversation's permission mode.
+The options are each backend's own. The plugin does not read this conversation's permission mode: a delegate may do what you write on the first line, so it is you who makes the two match.
 
 | Codex                 | It may                                                       |
 | --------------------- | ------------------------------------------------------------ |
@@ -54,9 +54,19 @@ The options are each backend's own. Nothing is taken from this conversation's pe
 
 Nobody can approve a request while a delegate runs. What its option does not allow is declined, and the result lists it under `declined`.
 
-- **Give the least the task needs.** Reviews and diagnoses only read. An implementation needs `approve-for-me`, or `auto` on Antigravity.
-- **Never more than this conversation has.** In plan or manual mode a delegate only reads. Use `full-access`, `skip-permissions` or `--sandbox disabled` only when the user asks for them, or this conversation itself runs with permissions bypassed.
-- **When something is declined**, continue the same subagent with a higher `--permission` if the rule above allows it. Otherwise tell the user what was declined and let them decide.
+**Give a delegate what this conversation has.** Pass the option that matches the permission mode this conversation is in:
+
+| This conversation's mode                      | Codex              | Antigravity        |
+| --------------------------------------------- | ------------------ | ------------------ |
+| plan                                          | `read-only`        | `plan`             |
+| default (manual: you ask before each edit)    | `read-only`        | `default`          |
+| accept edits                                  | `ask-for-approval` | `accept-edits`     |
+| auto                                          | `approve-for-me`   | `auto`             |
+| bypass permissions                            | `full-access`      | `skip-permissions` |
+
+- **The user's word comes first.** If they name an option, or ask for this delegate to have more or less, use that.
+- **If you cannot tell which mode this conversation is in**, give the least the task needs: reading for a review or a diagnosis, `ask-for-approval` or `accept-edits` for a change.
+- **When something is declined**, the delegate already had what this conversation has, so do not raise the option on your own. Tell the user what was declined and which option would allow it, and continue the same subagent with that option once they agree, or once this conversation's mode has changed.
 - Before a turn that can edit, check that its files do not overlap with files being edited here.
 
 ## Conversations

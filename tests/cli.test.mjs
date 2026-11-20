@@ -267,6 +267,62 @@ test("the models listing groups ids, folds thinking levels and marks the default
   assert.match(shown, /Other Agent \(--backend other\)\n  could not list its models: not installed/);
 });
 
+test("the progress view drops what a progress note cannot use", async () => {
+  const { compactLog } = await import("../plugins/delegate/scripts/lib/progress.mjs");
+  const log = [
+    "[07:13:52] started codex (permission mode acceptEdits: follows the conversation)",
+    "[07:13:53] session 01a1f7cd-f6ed-7bc2-82fd-1cd2a16233f9 · model gpt-6.2-astra",
+    "[07:13:57] thinking: weighing options",
+    "[07:13:58] running command: /bin/zsh -lc 'cat test.mjs'",
+    "[07:13:58] command completed (exit 0): /bin/zsh -lc 'cat test.mjs'",
+    "           line one",
+    "           line two",
+    "           line three",
+    "[07:14:05] edit completed: update /work/repo/src/math.js",
+    `[07:14:06] command completed (exit 0): /bin/zsh -lc "rg -g '!x' src"`,
+    `[07:14:06] command completed (exit 0): /bin/zsh -lc 'echo '"'"'hi'"'"''`,
+    "[07:14:07] running command: /bin/zsh -lc 'node test.mjs'",
+    "[07:14:16] finished: completed",
+    ""
+  ].join("\n");
+  assert.deepEqual(compactLog(log, { cwd: "/work/repo" }).split("\n"), [
+    "command completed (exit 0): cat test.mjs",
+    "  [1 earlier lines of output not shown]",
+    "  line two",
+    "  line three",
+    "edit completed: update src/math.js",
+    `command completed (exit 0): rg -g '!x' src`,
+    // Here the wrapper's own quote appears inside the command, so taking it off would misquote it.
+    `command completed (exit 0): /bin/zsh -lc 'echo '"'"'hi'"'"''`,
+    "running command: node test.mjs"
+  ]);
+});
+
+test("the answer handed back is the short form; the full record stays with result", async () => {
+  const { renderAnswer, renderResult } = await import("../plugins/delegate/scripts/lib/render.mjs");
+  const job = finished("task-short1", {
+    sessionId: "session-1",
+    result: {
+      text: "hello world",
+      actions: [
+        { kind: "command", title: "cat a.txt", status: "completed", exitCode: 0 },
+        { kind: "command", title: "rm -rf build", status: "declined" }
+      ],
+      usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+      error: null
+    }
+  });
+  const lines = renderAnswer(job).split("\n");
+  assert.match(lines[0], /^\[delegate\] Codex Agent \(gpt-test\) · completed · \S+ · default · task-short1$/);
+  assert.deepEqual(lines.slice(1), ["session: session-1", "refused (1):", "- [command] rm -rf build (declined)", "", "hello world"]);
+  // A later turn of the same conversation was started with the id, so it is not repeated.
+  assert.ok(!renderAnswer({ ...job, resumeSessionId: "session-1" }).includes("session:"));
+  // Nothing is lost: the full record still has every action and the usage.
+  const full = renderResult(job);
+  assert.match(full, /--- actions \(2\) ---/);
+  assert.match(full, /usage: input 10/);
+});
+
 test("progress batches get further apart as a job gets older", async () => {
   const { settleWindowMs } = await import("../plugins/delegate/scripts/lib/pacing.mjs");
   const seconds = (ageSec) => settleWindowMs(ageSec * 1000) / 1000;

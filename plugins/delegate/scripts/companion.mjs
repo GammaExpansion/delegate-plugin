@@ -11,9 +11,11 @@ import { CONVERSATION_MODE_FLAG, TOKEN_FLAG, parseArgs } from "./lib/args.mjs";
 import { BACKENDS, getBackend } from "./lib/backends/index.mjs";
 import { DEFAULT_MAX_WAIT_SEC, settleWindowMs } from "./lib/pacing.mjs";
 import { FALLBACK_MODE, MODES, resolvePermissionMode } from "./lib/permission.mjs";
+import { compactLog } from "./lib/progress.mjs";
 import {
   renderJobDetail,
   agentOf,
+  renderAnswer,
   renderModels,
   renderPending,
   renderResult,
@@ -22,7 +24,6 @@ import {
   renderStatusList
 } from "./lib/render.mjs";
 import {
-  LOG_INDENT,
   appendLog,
   createSecret,
   finishJob,
@@ -41,7 +42,6 @@ import {
   readLogFrom,
   readLogTail,
   readSecret,
-  splitLogEntries,
   takeAnswer,
   touchHeartbeat,
   updateJob,
@@ -444,43 +444,6 @@ function cmdResult(argv) {
 }
 
 /**
- * The compact view of a stretch of the job log: enough to say what the delegate is doing,
- * without the parts that are bulky and that a one-line progress note never uses.
- *   - reasoning ("thinking:") entries are left out
- *   - of a command's output only the last two lines are kept
- *   - interim messages are cut to a few hundred characters
- *   - a "starting ..." entry is dropped when the same batch shows how that step ended
- * The full log stays on disk; byte offsets always refer to it, not to this view.
- */
-function compactLog(text) {
-  const entries = splitLogEntries(text);
-  // A "starting ..." entry says nothing once the same batch also reports how it ended.
-  const finished = new Set();
-  for (const { body } of entries) {
-    const match = body.match(/^\S+ (?:completed|failed|declined)(?: \(exit -?\d+\))?: (.*)$/);
-    if (match) finished.add(match[1]);
-  }
-  const out = [];
-  for (const { head, body, rest: continuation } of entries) {
-    const rest = continuation.filter((line) => line.trim());
-    if (!head.trim() && !rest.length) continue;
-    if (body.startsWith("thinking:") || body.startsWith("permission request:")) continue;
-    const starting = body.match(/^(?:starting \S+|running command): (.*)$/);
-    if (starting && finished.has(starting[1])) continue;
-    if (body.startsWith("message:")) {
-      out.push(oneLine([head, ...rest].join(" "), 400));
-      continue;
-    }
-    out.push(oneLine(head, 300));
-    if (rest.length) {
-      if (rest.length > 2) out.push(`${LOG_INDENT}[${rest.length - 2} earlier lines of output not shown]`);
-      for (const line of rest.slice(-2)) out.push(`${LOG_INDENT}${oneLine(line, 160)}`);
-    }
-  }
-  return out.join("\n");
-}
-
-/**
  * Report what a job has done since `--offset`, for a caller that relays progress in steps.
  *
  * It returns when there is something to report, not on a timer: as soon as the job has
@@ -490,10 +453,12 @@ function compactLog(text) {
  * one costs at most one call per settle window.
  *
  * The caller is a model that keeps everything it reads, so by default the activity is
- * shown in a compact form (see compactLog). --verbose prints the log as written.
+ * shown in a compact form (see lib/progress.mjs). --verbose prints the log as written.
  *
- * Output: the new activity, then a trailer line. While the job runs the trailer carries
- * the offset for the next call; once it has ended the trailer is followed by the result.
+ * Output: the new activity, then either a trailer line with the offset for the next
+ * call, or, once the job has ended, the line "=== RESULT ===" and the answer. The answer
+ * is the short form (renderAnswer): the caller hands it on word for word, so every line
+ * in it is paid for three times over. `result` prints the full record.
  * Every call also marks the job as being followed (see the lease in runJob).
  */
 async function cmdFollow(argv) {
@@ -523,6 +488,10 @@ async function cmdFollow(argv) {
   const startedAt = Date.now();
   let lastBeat = 0;
   let firstNewAt = null;
+  // How far the log has been looked at. It moves past stretches that hold nothing the
+  // caller could report (the job starting, the model thinking), so that those do not
+  // cost the caller a call of its own.
+  let seen = offset;
   for (;;) {
     const now = Date.now();
     if (now - lastBeat >= 3000) {
@@ -534,8 +503,13 @@ async function cmdFollow(argv) {
     // where the log stood when the question was recorded, so a caller that has read no
     // further than that has not seen it.
     if (job.pending && offset <= (job.pending.logOffset ?? 0)) break;
-    if (firstNewAt === null && logSize(cwd, job.id) > offset) firstNewAt = now;
-    if (firstNewAt !== null && now - firstNewAt >= settleMs()) break;
+    if (firstNewAt === null && logSize(cwd, job.id) > seen) firstNewAt = now;
+    if (firstNewAt !== null && now - firstNewAt >= settleMs()) {
+      const batch = readLogFrom(cwd, job.id, offset);
+      if (options.verbose || compactLog(batch.text, { cwd: job.cwd })) break;
+      seen = batch.nextOffset;
+      firstNewAt = null;
+    }
     if (now - startedAt >= maxWaitMs) break;
     await sleep(300);
     job = getJob(cwd, job.id) ?? job;
@@ -548,17 +522,16 @@ async function cmdFollow(argv) {
   }
 
   const { text, nextOffset } = readLogFrom(cwd, job.id, offset);
-  const shown = options.verbose ? text.trimEnd() : compactLog(text);
+  const shown = options.verbose ? text.trimEnd() : compactLog(text, { cwd: job.cwd });
   if (shown) console.log(shown);
   if (isActive(job)) {
     const state = job.pending ? "waiting-for-approval" : job.status;
-    console.log(`[follow] job=${job.id} state=${state} next-offset=${nextOffset} agent="${agentOf(job)}"`);
+    console.log(`[follow] state=${state} next-offset=${nextOffset} agent="${agentOf(job)}"`);
     if (job.pending) console.log(renderPending(job));
     return 0;
   }
-  console.log(`[follow] job=${job.id} state=${job.status}`);
   console.log("=== RESULT ===");
-  console.log(renderResult(job));
+  console.log(renderAnswer(job));
   return 0;
 }
 

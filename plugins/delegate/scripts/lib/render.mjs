@@ -52,6 +52,34 @@ function renderAction(action) {
   return `- [${action.kind}] ${oneLine(action.title, 160)}${bits.length ? ` (${bits.join(", ")})` : ""}`;
 }
 
+const isRefused = (action) => action.permission === "denied" || action.status === "declined";
+
+/**
+ * A finished job as the forwarding subagent hands it back: the answer, under the few
+ * lines its reader needs in order to act on it. Everything else (the actions, the token
+ * counts, where the permission mode came from) is in the full record, which `result`
+ * prints.
+ *
+ * The session id is given on the turn that opened the session. A later turn was started
+ * with that id, so the caller already has it.
+ */
+export function renderAnswer(job) {
+  const result = job.result ?? {};
+  const lines = [[`[delegate] ${agentOf(job)}`, job.status, formatDuration(jobDurationMs(job)), modeOf(job), job.id].join(" · ")];
+  if (job.sessionId && job.sessionId !== job.resumeSessionId) lines.push(`session: ${job.sessionId}`);
+  if (job.worktree) lines.push(worktreeLine(job));
+  if (result.error) lines.push(`error: ${result.error}`);
+  if (job.status === "cancelled" && !result.error) lines.push("note: the run was cancelled before it finished.");
+  const refused = (result.actions ?? []).filter(isRefused);
+  if (refused.length) {
+    lines.push(`refused (${refused.length}):`, ...refused.slice(0, 10).map(renderAction));
+    if (refused.length > 10) lines.push(`- … ${refused.length - 10} more`);
+  }
+  lines.push("", result.text ? result.text : "(no message)");
+  return lines.join("\n");
+}
+
+/** The full record of a finished job, for `result`. */
 export function renderResult(job) {
   const result = job.result ?? {};
   const lines = [headline(job)];
@@ -64,7 +92,7 @@ export function renderResult(job) {
   if (job.status === "cancelled" && !result.error) lines.push("note: the run was cancelled before it finished.");
 
   const actions = result.actions ?? [];
-  const refused = actions.filter((action) => action.permission === "denied" || action.status === "declined").length;
+  const refused = actions.filter(isRefused).length;
   if (refused) {
     lines.push(
       `note: ${refused} action(s) were refused. The turn ran in permission mode "${modeOf(job)}".`
@@ -99,11 +127,7 @@ export function renderPending(job) {
 }
 
 export function renderStarted(job) {
-  return [
-    `${headline(job)}`,
-    `Started. Watch it and collect the result with: follow ${job.id} --offset 0`,
-    `Stop it with: cancel ${job.id}`
-  ].join("\n");
+  return `[delegate] started ${job.id} · ${agentOf(job)} · ${modeOf(job)}   (follow ${job.id} --offset 0)`;
 }
 
 export function renderStatusList(jobs) {

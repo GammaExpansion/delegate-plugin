@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Delegate tasks from Claude Code to other vendors' coding agents.",
-    "version": "0.2.2"
+    "version": "0.2.3"
   },
   "plugins": [
     {
       "name": "delegate",
       "description": "Hand tasks to Codex or Antigravity from Claude Code and get the result back.",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "source": "./plugins/delegate",
       "author": {
         "name": "GammaExpansion",

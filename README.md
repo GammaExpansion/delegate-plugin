@@ -128,7 +128,7 @@ A delegate behaves like any other Claude Code subagent:
 - To follow up ("now apply the first fix you proposed"), Claude continues the same subagent. The delegate remembers the whole conversation.
 - A new subagent is a new conversation. Several can run side by side.
 
-Nobody has to keep track of ids. Under the hood the backend process exits after every turn, and the conversation lives in the backend's own session store. Each result prints that session's id, and the forwarding subagent, which still has its earlier results in context, passes it back with `--resume` on the next turn.
+Nobody has to keep track of ids. Under the hood the backend process exits after every turn, and the conversation lives in the backend's own session store. The first result prints that session's id, and the forwarding subagent, which still has it in context, passes it back with `--resume` on every later turn.
 
 A conversation takes one turn at a time. Once its subagent is gone (the Claude Code session ended, for instance), the conversation can still be reopened by hand with `task --resume <session-id>`.
 
@@ -156,6 +156,8 @@ Every task runs the same way:
 1. The subagent calls `task`, which starts the delegate as a detached job and returns a job id at once.
 2. The subagent calls `follow <job-id> --offset <n>` in a loop. Each call returns what the delegate did since the last one: commands and their output, file edits, interim messages, reasoning summaries. After each call the subagent writes a one-line progress note. If the delegate needs your permission, `follow` returns with the request, and the subagent puts it to you (see [Permission model](#permission-model)).
 3. When the job has ended, `follow` prints the result and the subagent returns it unchanged.
+
+What comes back is short on purpose: one line naming the agent, the model, the outcome and the job, then the delegate's answer. The subagent's model has to read that text and write it out again, and Claude then carries it for the rest of the conversation, so anything else in it would be paid for three times. The full record of a job, with every action and the token counts, is one command away: `/delegate:result <job-id>`.
 
 The delegate is shown as `Codex Agent` or `Gemini Agent`, with the model it is running on once that is known, as in `Codex Agent (gpt-6.2-astra)`. The name leads each progress note, each permission request, and the first line of the result.
 
@@ -306,6 +308,7 @@ plugins/delegate/
         ├── hook.mjs       what the hook decides about a command
         ├── abort.mjs      the grace period after a cancel
         ├── pacing.mjs     how often `follow` hands back a batch of progress
+        ├── progress.mjs   the compact view of the job log that `follow` shows
         ├── permission.mjs the permission modes, and which one a turn runs in
         ├── rpc.mjs        JSON-RPC client over a child process's stdio, shared by both backends
         ├── state.mjs      job records (one JSON file per job)

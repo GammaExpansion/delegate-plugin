@@ -219,7 +219,7 @@ export function updateJob(cwd, id, patch) {
 // The job log's framing: an entry opens with a time stamp, and the further lines of a
 // multi-line entry are indented to sit under its text.
 const LOG_STAMP = /^\[\d\d:\d\d:\d\d\] /;
-export const LOG_INDENT = " ".repeat(11);
+const LOG_INDENT = " ".repeat(11);
 
 /** Append one entry to the job log. */
 export function appendLog(cwd, id, text) {
@@ -241,7 +241,7 @@ export function splitLogEntries(text) {
   const entries = [];
   for (const line of text.split("\n")) {
     if (LOG_STAMP.test(line) || !entries.length) entries.push({ head: line, body: line.replace(LOG_STAMP, ""), rest: [] });
-    else entries[entries.length - 1].rest.push(line);
+    else entries[entries.length - 1].rest.push(line.startsWith(LOG_INDENT) ? line.slice(LOG_INDENT.length) : line);
   }
   return entries;
 }

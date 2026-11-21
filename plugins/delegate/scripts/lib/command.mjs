@@ -48,10 +48,14 @@ function findOnPath(name, env) {
   const get = (key) => env[Object.keys(env).find((k) => k.toUpperCase() === key) ?? key];
   const exts = (get("PATHEXT") || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
   const candidates = path.extname(name) ? [name] : exts.map((ext) => name + ext);
-  const dirs = path.isAbsolute(name) || name.includes("\\") || name.includes("/") ? [""] : (get("PATH") || "").split(";");
+  // A name that is already a path is taken as it is. Otherwise only PATH is searched, and
+  // an empty entry in it (a doubled or trailing `;`) is skipped: it must not come to mean
+  // the current directory, which is the user's project and may hold a `codex.cmd` of its own.
+  const isPath = path.isAbsolute(name) || name.includes("\\") || name.includes("/");
+  const dirs = isPath ? [""] : (get("PATH") || "").split(";");
   for (const dir of dirs) {
-    const base = dir.replace(/^"(.*)"$/, "$1");
-    if (dir && !base) continue;
+    const base = dir.trim().replace(/^"(.*)"$/, "$1");
+    if (!isPath && !base) continue;
     for (const candidate of candidates) {
       const full = base ? path.join(base, candidate) : candidate;
       try {

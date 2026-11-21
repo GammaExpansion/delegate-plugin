@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { prependPath, writeFakeBin } from "./fixtures/fake-bin.mjs";
 
 const COMPANION = fileURLToPath(new URL("../plugins/delegate/scripts/companion.mjs", import.meta.url));
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "delegate-test-")));
@@ -181,17 +182,13 @@ test("agy's options are its own modes, and --sandbox is its own flag", () => {
 // A real run, start to finish, with a stand-in for `codex app-server` first on PATH.
 const fakeBin = path.join(scratch, "bin");
 fs.mkdirSync(fakeBin);
-fs.writeFileSync(
-  path.join(fakeBin, "codex"),
-  `#!/bin/sh\nexec "${process.execPath}" "${fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url))}" "$@"\n`,
-  { mode: 0o755 }
-);
+writeFakeBin(fakeBin, "codex", fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url)));
 const record = path.join(scratch, "fake-codex-record.jsonl");
 const runFor = (scenario) => (args, input) =>
   companion(["run", "--backend", "codex", ...args], {
     cwd: workspace,
     input,
-    env: { ...process.env, PATH: `${fakeBin}${path.delimiter}${process.env.PATH}`, FAKE_CODEX_SCENARIO: scenario, FAKE_CODEX_RECORD: record }
+    env: { ...prependPath(process.env, fakeBin), FAKE_CODEX_SCENARIO: scenario, FAKE_CODEX_RECORD: record }
   });
 const recorded = () => fs.readFileSync(record, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 
@@ -280,7 +277,8 @@ test("an answer file that has gone missing is written again, and one that cannot
   const answer = path.join(exchange, `${id}.md`);
   // The scratchpad is cleared: the record still has the text, so the file comes back.
   fs.rmSync(exchange, { recursive: true });
-  assert.match(wait(id).stdout, new RegExp(`^answer: ${answer.replace(/[.]/g, "\\.")}$`, "m"));
+  // Escaped in full: a Windows path is full of backslashes.
+  assert.match(wait(id).stdout, new RegExp(`^answer: ${answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
   assert.equal(fs.readFileSync(answer, "utf8"), "all done\n");
   // Now it cannot be written at all (a file stands where the directory should be).
   fs.rmSync(exchange, { recursive: true });

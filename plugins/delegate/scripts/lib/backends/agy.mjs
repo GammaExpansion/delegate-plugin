@@ -4,7 +4,7 @@
 // which is a session mode or the flag that switches its checks off. Nobody is there to
 // approve anything while a delegate runs, so what agy asks about is declined and listed
 // in the result. The one exception is reading inside the workspace, which is allowed.
-import { execFileSync } from "node:child_process";
+import { execCommandSync } from "../command.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { afterAbort, CANCEL_GRACE_MS } from "../abort.mjs";
@@ -145,7 +145,7 @@ function withFamily(model) {
 function fetchModels() {
   let output;
   try {
-    output = execFileSync("agy", ["models"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+    output = execCommandSync("agy", ["models"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
   } catch (error) {
     if (error.code === "ENOENT") throw new Error("`agy` was not found on PATH.");
     const lastLine = String(error.stderr || error.message).trim().split("\n").pop();
@@ -184,7 +184,7 @@ export const agyBackend = {
   check() {
     const info = { installed: false, version: null, auth: "unknown", hint: null };
     try {
-      info.version = execFileSync("agy", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      info.version = execCommandSync("agy", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
       info.installed = true;
     } catch {
       info.hint = "Install the Antigravity CLI so that `agy` is on PATH.";

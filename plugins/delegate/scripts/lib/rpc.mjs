@@ -1,6 +1,7 @@
 // Newline-delimited JSON-RPC over a child process's stdio.
 // Shared by both backends: `codex app-server` and `agy acp` speak the same framing.
 import { spawn } from "node:child_process";
+import { resolveCommand } from "./command.mjs";
 import fs from "node:fs";
 import readline from "node:readline";
 
@@ -55,7 +56,13 @@ export class StdioRpcClient {
   #rejectFailure;
 
   start() {
-    this.child = spawn(this.command, this.args, { cwd: this.cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const resolved = resolveCommand(this.command, this.args);
+    this.child = spawn(resolved.command, resolved.args, {
+      cwd: this.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: resolved.shell ?? false,
+      windowsHide: true
+    });
     this.child.on("error", (error) => {
       const message =
         error.code === "ENOENT"

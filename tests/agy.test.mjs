@@ -7,11 +7,12 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { writeFakeBin } from "./fixtures/fake-bin.mjs";
 
 const FAKE = fileURLToPath(new URL("./fixtures/fake-agy.mjs", import.meta.url));
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "delegate-agy-test-")));
 // The backend runs whatever `agy` is first on PATH.
-fs.writeFileSync(path.join(scratch, "agy"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`, { mode: 0o755 });
+writeFakeBin(scratch, "agy", FAKE);
 process.env.PATH = `${scratch}${path.delimiter}${process.env.PATH}`;
 const { agyBackend } = await import("../plugins/delegate/scripts/lib/backends/agy.mjs");
 

@@ -4,7 +4,7 @@
 // which sets its sandbox and when it asks for approval. Nobody is there to approve
 // anything while a delegate runs, so every request that reaches this client is declined.
 // Codex records the step as declined and carries on, which is how it ends up in the result.
-import { execFileSync } from "node:child_process";
+import { execCommandSync } from "../command.mjs";
 import { afterAbort, CANCEL_GRACE_MS } from "../abort.mjs";
 import { StdioRpcClient } from "../rpc.mjs";
 import { clipHead, clipTail, oneLine } from "../text.mjs";
@@ -110,7 +110,7 @@ export const codexBackend = {
   check() {
     const info = { installed: false, version: null, auth: "unknown", hint: null };
     try {
-      info.version = execFileSync("codex", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      info.version = execCommandSync("codex", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
       info.installed = true;
     } catch {
       info.hint = "Install with `npm install -g @openai/codex`.";
@@ -118,7 +118,7 @@ export const codexBackend = {
     }
     try {
       // Exit code only: the output can include part of an API key, so it is not echoed.
-      execFileSync("codex", ["login", "status"], { stdio: "ignore" });
+      execCommandSync("codex", ["login", "status"], { stdio: "ignore" });
       info.auth = "ok";
     } catch {
       info.auth = "missing";

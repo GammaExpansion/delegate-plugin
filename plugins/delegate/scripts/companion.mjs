@@ -11,7 +11,17 @@ import { parseArgs, takeLeadingOptions } from "./lib/args.mjs";
 import { BACKENDS, getBackend } from "./lib/backends/index.mjs";
 import { DEFAULT_MAX_WAIT_SEC, settleWindowMs } from "./lib/pacing.mjs";
 import { statusLine } from "./lib/progress.mjs";
-import { renderAnswer, renderJobDetail, renderModels, renderResult, renderRunning, renderSetup, renderStatusList } from "./lib/render.mjs";
+import {
+  agentOf,
+  jobDurationMs,
+  renderAnswer,
+  renderJobDetail,
+  renderModels,
+  renderResult,
+  renderRunning,
+  renderSetup,
+  renderStatusList
+} from "./lib/render.mjs";
 import {
   answerFileOf,
   appendLog,
@@ -43,7 +53,7 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const CANCEL_WAIT_MS = 15_000;
 const WORKER_REGISTER_WAIT_MS = 5_000;
 // A job stops itself when nothing has waited on it for this long, so that a delegate
-// does not keep working after the subagent watching it was interrupted.
+// does not keep working after whoever was watching it went away.
 const DEFAULT_LEASE_SEC = 120;
 const LEASE_TICK_MS = 2000;
 // The options a request may carry at its top, written by whoever composed it.
@@ -215,7 +225,7 @@ async function runJob(cwd, id) {
           lastTickMs = now;
           const lastSeen = Math.max(leaseFloorMs, lastHeartbeatMs(cwd, id) ?? 0);
           if (controller.signal.aborted || now - lastSeen <= leaseSec * 1000) return;
-          stopError ??= `Stopped because nothing waited on the job for ${leaseSec}s. The subagent watching it was probably interrupted.`;
+          stopError ??= `Stopped because nothing waited on the job for ${leaseSec}s. Whoever was watching it was probably interrupted.`;
           appendLog(cwd, id, `nothing has waited on this job for ${leaseSec}s; stopping it`);
           controller.abort();
         }, LEASE_TICK_MS)
@@ -301,17 +311,22 @@ async function runJob(cwd, id) {
  * (see takeLeadingOptions). Those win over the same options on the command line, which
  * is for callers that have no request to write them in.
  *
- * The request reaches this command in one of four ways. The forwarding subagent uses
- * --message-file: text of any kind arrives whole that way, where on a command line or in
- * a heredoc it would have to get past the shell and past Claude Code's checks on shell
- * commands. That file is the subagent's own scratch copy, so it is removed once read, and
- * the answer is saved in the same directory (see saveAnswer).
+ * The request reaches this command in one of four ways. The plugin's own tools (the mod
+ * in hooks/) write it to stdin with --verbatim, so that it is the task and nothing else:
+ * its options come on the command line, and a task that happens to start with "--" is
+ * not read as options. --message-file is for a caller that hands the request over in a
+ * scratch file: that file is removed once read, and the answer is saved in the same
+ * directory (see saveAnswer).
+ *
+ * --json prints the news as one JSON object (see newsOf), for a caller that is a
+ * program rather than a model.
  */
 async function cmdRun(argv) {
   const { options: given, positionals } = parseArgs(argv, {
+    booleans: ["json", "verbatim"],
     values: ["backend", ...REQUEST_OPTIONS, "resume", "cwd", "prompt-file", "message-file", "timeout-sec", "max-wait-sec", "settle-sec"]
   });
-  const cwd = path.resolve(given.cwd ?? process.cwd());
+  let cwd = path.resolve(given.cwd ?? process.cwd());
 
   let text = positionals.join(" ").trim();
   let messageFile = null;
@@ -330,7 +345,7 @@ async function cmdRun(argv) {
     text = (await readStdin()).trim();
   }
   const exchangeDir = messageFile ? path.dirname(messageFile) : null;
-  const { options: written, body } = takeLeadingOptions(text, REQUEST_OPTIONS);
+  const { options: written, body } = given.verbatim ? { options: {}, body: text } : takeLeadingOptions(text, REQUEST_OPTIONS);
   const options = { ...given, ...written };
   // A long brief, or one full of code, can be kept in a file and named at the top of the
   // request. Whatever else the request says follows it.
@@ -355,6 +370,10 @@ async function cmdRun(argv) {
     sandbox: options.sandbox ?? (options.permission === undefined ? earlier.sandbox : undefined)
   });
 
+  // A conversation that started in a worktree goes on in it, wherever it is continued
+  // from, unless the caller names a directory. One whose worktree is gone goes on here.
+  if (!given.cwd && resume?.job?.worktree && fs.existsSync(resume.job.cwd)) cwd = resume.job.cwd;
+
   if (resume) {
     // One turn at a time per session: two writers on one session lose or reject a turn.
     const busy = jobs.find(
@@ -366,7 +385,7 @@ async function cmdRun(argv) {
   }
 
   const timeoutSec = parseTimeoutSec(options["timeout-sec"]);
-  const waits = waitOptions(options);
+  const waits = { ...waitOptions(options), json: Boolean(given.json) };
 
   const job = writeJob(cwd, {
     id: newJobId(),
@@ -474,7 +493,7 @@ function waitOptions(options) {
  * call per settle window. Every call also marks the job as watched (see the lease in
  * runJob).
  */
-async function reportNews(cwd, job, { maxWaitMs, settleSec }) {
+async function reportNews(cwd, job, { maxWaitMs, settleSec, json = false }) {
   const offset = readCursor(cwd, job.id);
   const settleMs = () =>
     settleSec !== null ? settleSec * 1000 : settleWindowMs(Date.now() - Date.parse(job.startedAt ?? job.createdAt));
@@ -507,20 +526,42 @@ async function reportNews(cwd, job, { maxWaitMs, settleSec }) {
   touchHeartbeat(cwd, job.id);
 
   if (!isActive(job)) {
-    console.log(renderAnswer(withAnswerFile(cwd, job), `node "${SCRIPT_PATH}" result ${job.id}`));
+    const answer = renderAnswer(withAnswerFile(cwd, job), `node "${SCRIPT_PATH}" result ${job.id}`);
+    console.log(json ? JSON.stringify(newsOf(job, { text: answer })) : answer);
     return 0;
   }
   const { text, nextOffset } = readLogFrom(cwd, job.id, offset);
   writeCursor(cwd, job.id, nextOffset);
-  console.log(renderRunning(job, statusLine(text, { cwd: job.cwd }), `node "${SCRIPT_PATH}" wait ${job.id}`));
+  const doing = statusLine(text, { cwd: job.cwd });
+  console.log(json ? JSON.stringify(newsOf(job, { doing })) : renderRunning(job, doing, `node "${SCRIPT_PATH}" wait ${job.id}`));
   return 0;
 }
 
+/**
+ * The news of `run` and `wait` as data, for --json. `state` says which kind it is.
+ *
+ * - `running`: `doing` is the same line the text form shows (null when there is nothing
+ *   new to tell), and the job goes on.
+ * - `done`: `text` is the whole result as the text form prints it, the answer included
+ *   unless the request came in a message file. `status` says how the job ended.
+ */
+function newsOf(job, { doing = null, text = null }) {
+  const common = {
+    job: job.id,
+    backend: job.backend,
+    agent: agentOf(job),
+    elapsedMs: jobDurationMs(job),
+    session: job.sessionId ?? null,
+    worktree: job.worktree ?? null
+  };
+  return isActive(job) ? { state: "running", ...common, doing: doing || null } : { state: "done", ...common, status: job.status, text };
+}
+
 async function cmdWait(argv) {
-  const { options, positionals } = parseArgs(argv, { values: ["cwd", "max-wait-sec", "settle-sec"] });
+  const { options, positionals } = parseArgs(argv, { booleans: ["json"], values: ["cwd", "max-wait-sec", "settle-sec"] });
   if (!positionals[0]) throw new Error("wait needs a job id.");
   const { job, home } = findJob(path.resolve(options.cwd ?? process.cwd()), positionals[0]);
-  return reportNews(home, job, waitOptions(options));
+  return reportNews(home, job, { ...waitOptions(options), json: Boolean(options.json) });
 }
 
 async function cmdCancel(argv) {
@@ -612,9 +653,9 @@ function cmdSetup(argv) {
 const USAGE = `Usage:
   companion.mjs run    --backend <${Object.keys(BACKENDS).join("|")}> [--resume <session-or-job>]
                        [--permission <option>] [--sandbox <enabled|disabled>] [--model <id>] [--effort <level>]
-                       [--timeout-sec <n>] [--cwd <dir>]
+                       [--timeout-sec <n>] [--cwd <dir>] [--json] [--verbatim]
                        [task text | --prompt-file <path> | --message-file <path> | stdin]
-  companion.mjs wait   <job> [--max-wait-sec <n>] [--settle-sec <n>]
+  companion.mjs wait   <job> [--max-wait-sec <n>] [--settle-sec <n>] [--json]
   companion.mjs status [job] [--all] [--json]
   companion.mjs result [job] [--json]
   companion.mjs cancel [job]
@@ -628,7 +669,11 @@ A job that nothing waits on for ${DEFAULT_LEASE_SEC}s stops itself.
 
 --permission, --sandbox, --model and --effort may also be written at the top of the
 task text, before the task itself. What is written there wins. --brief-file <path>
-there adds the content of a file to the task.
+there adds the content of a file to the task. --verbatim takes the text as the task
+and nothing else.
+
+--json prints the news of run and wait as one JSON object: {"state":"running", ...,
+"doing"} while the job goes on, {"state":"done", ..., "status", "text"} once it is over.
 
 --message-file is how a caller passes the task without retyping it into a command, and
 gets the answer back without retyping it either: the file is read and removed, and the

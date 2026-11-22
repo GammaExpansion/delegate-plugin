@@ -1,38 +1,31 @@
 ---
 description: Hand a task to Codex or Antigravity and show its answer
-argument-hint: "<codex|agy> [--worktree] [--permission <option>] [--sandbox enabled|disabled] [--model <id>] [--effort <level>] <task>"
-allowed-tools: Agent, Bash(node:*)
+argument-hint: "<codex|agy> [--worktree] [--background] [--permission <option>] [--sandbox enabled|disabled] [--model <id>] [--effort <level>] <task>"
+allowed-tools: mcp__delegate__codex, mcp__delegate__agy, mcp__delegate__wait
 ---
 
-Route this request to a delegate subagent with the `Agent` tool.
+Hand this request to a delegate with its tool.
 
 Raw request:
 $ARGUMENTS
 
-Choosing the subagent:
+Choosing the tool:
 
-- The first word names the backend. `codex` means `subagent_type: "delegate:codex"`. `agy`, `antigravity` or `gemini` means `subagent_type: "delegate:agy"`.
+- The first word names the backend. `codex` means `mcp__delegate__codex`. `agy`, `antigravity` or `gemini` means `mcp__delegate__agy`.
 - If no backend is named, ask the user which one they want before doing anything else.
-- These are subagents, not skills. Call them with `Agent`, never with `Skill`.
-- Start the `description` of the `Agent` call with `Codex Agent` or `Gemini Agent`, then the task in a few words, such as `Codex Agent: review token refresh`. If the user named a model, put it in: `Gemini Agent (gemini-3.8-flash-low): explain math.js`. It is what the user sees while the delegate works.
+- If neither tool is available, the plugin's mod is not loaded: tell the user that delegate needs a Claude Code that runs mods, with mods allowed, and stop.
 
-Worktree:
+What to pass:
 
-- `--worktree` in the request is addressed to you, not to the subagent. Start the subagent with `isolation: "worktree"` on the `Agent` call and remove the flag from what you forward.
-- Without `--worktree`, do not isolate the subagent. It works in the current directory.
-
-What to forward:
-
-- The subagent's prompt is the options on its first line, then the task. Put `--permission`, `--sandbox`, `--model` and `--effort` there as the user typed them.
+- `--permission`, `--sandbox`, `--model` and `--effort` go in the tool's fields of the same names, as the user typed them. `--worktree` is `worktree: true` and `--background` is `background: true`.
 - If the user typed no `--permission`, choose the one that matches this conversation's permission mode, as the `delegating-tasks` skill says.
-- If the user means to continue an earlier delegate conversation from this session, do not start a new subagent. Continue the subagent that held that conversation by sending it the new request.
-- The delegate cannot see this conversation. If the task refers to something only this conversation knows ("that bug", "the file we were looking at"), replace the reference with the concrete file paths, error text and goal. Change nothing else about the task.
+- `task` is the rest of the request. The delegate cannot see this conversation. If the task refers to something only this conversation knows ("that bug", "the file we were looking at"), replace the reference with the concrete file paths, error text and goal. Change nothing else about the task.
+- If the user means to continue an earlier delegate conversation from this session, pass the `session` from that conversation's latest result.
 - If the user gave no task text, ask what the delegate should do.
-
-If the user does not want to wait for the answer, run the subagent in the background. There is no separate background mode: the subagent reports back when the delegate has finished.
 
 Afterwards:
 
-- The subagent's output is a few lines, one of which names the file the delegate's answer was saved in (`answer: <path>`). Read that file and show the answer to the user as it is, under the first line of the subagent's output.
+- The result is a few lines on how the turn ended, then the delegate's answer. Show the answer to the user as it is, under the first line of the result.
+- After a background start, say that the delegate is running and that its answer will follow.
 - Stop there. Do not apply the delegate's suggestions or continue its work unless the user asks.
-- If the output says a backend is missing or not logged in, point the user to `/delegate:setup`.
+- If the result says a backend is missing or not logged in, point the user to `/delegate:setup`.

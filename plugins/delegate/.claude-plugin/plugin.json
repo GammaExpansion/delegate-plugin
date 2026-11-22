@@ -1,10 +1,11 @@
 {
   "name": "delegate",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Hand tasks to Codex or Antigravity from Claude Code and get the result back.",
   "author": {
     "name": "GammaExpansion",
     "url": "https://github.com/GammaExpansion"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "types": "./types/index.d.ts"
 }

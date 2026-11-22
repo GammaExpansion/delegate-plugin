@@ -1,2 +1,4 @@
 .DS_Store
 node_modules/
+# Written by Claude Code each time it loads the mod from a folder it watches.
+plugins/delegate/.claude-plugin/types/

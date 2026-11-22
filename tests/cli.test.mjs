@@ -348,6 +348,51 @@ test("every worktree of a repository shares one set of job records", () => {
   assert.notEqual(stateDir(repo), stateDir(workspace));
 });
 
+test("a conversation that started in a worktree goes on there, wherever it is continued from", () => {
+  const repo = path.join(scratch, "repo-wt");
+  const linked = path.join(scratch, "repo-wt-linked");
+  fs.mkdirSync(repo);
+  const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "ignore" });
+  git(repo, "init", "-q");
+  git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init");
+  git(repo, "worktree", "add", "-q", "-b", "wt", linked);
+  const real = fs.realpathSync(linked);
+  writeJob(repo, finished("task-wt1", { cwd: real, worktree: { path: real, branch: "wt" }, sessionId: "thread-main" }));
+
+  const next = companion(["run", "--backend", "codex", "--resume", "thread-main", "--json", "--verbatim"], {
+    cwd: repo,
+    input: "Go on.",
+    env: { ...prependPath(process.env, fakeBin), FAKE_CODEX_SCENARIO: "normal" }
+  });
+  assert.equal(next.status, 0, next.stderr);
+  const news = JSON.parse(next.stdout);
+  assert.equal(getJob(repo, news.job).cwd, real);
+  assert.deepEqual(news.worktree, { path: real, branch: "wt" });
+});
+
+test("with --json, run and wait print their news as one object, and --verbatim keeps the task whole", () => {
+  const done = runFor("normal")(["--json", "--verbatim"], "--permission full-access\nDo the thing.");
+  assert.equal(done.status, 0, done.stderr);
+  const news = JSON.parse(done.stdout);
+  assert.equal(news.state, "done");
+  assert.equal(news.status, "completed");
+  assert.equal(news.session, "thread-main");
+  assert.match(news.agent, /^Codex Agent \(fake-model/);
+  // The first line looked like an option and was not taken as one.
+  assert.match(news.text, / · read-only · task-/);
+  assert.match(news.text, /\n\nall done$/);
+  assert.equal(getJob(workspace, news.job).prompt, "--permission full-access\nDo the thing.");
+
+  writeJob(workspace, running("task-json1"));
+  appendLog(workspace, "task-json1", "command completed (exit 0): ls");
+  const shown = wait("task-json1", {});
+  const still = JSON.parse(companion(["wait", "task-json1", "--json", "--max-wait-sec", "0"], { cwd: workspace }).stdout);
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(still.state, "running");
+  assert.equal(still.job, "task-json1");
+  assert.equal(still.doing, null, "what the text form already told is not told again");
+});
+
 test("the state directory does not move when the working directory disappears", () => {
   const gone = path.join(scratch, "short-lived");
   fs.mkdirSync(gone);

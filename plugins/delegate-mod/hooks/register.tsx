@@ -28,6 +28,12 @@ const spawns = new Map<string, Spawn>()
 const notOurs = new Set<string>()
 /** Hand-back calls made, by turn, to check on the step after. */
 const handedBack = new Map<string, { id: string; report: string }>()
+/**
+ * Whether a delegate's latest run was offered the hand-back tool, by agent. Claude Code
+ * offers it where auto mode's checks need it; elsewhere a subagent's last words are its
+ * report. Where nobody is asked, it stays offered, which is what a missing entry means.
+ */
+const handBackOffered = new Map<string, boolean>()
 
 const CONVERSATIONS_KEPT = 200
 const conversationKey = (agentId: string) => `conversation:${agentId}`
@@ -239,6 +245,7 @@ async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: stri
   }
   const report = await runDelegate($, agentId, backend, signal)
   if (report === null) return yield* endTurn(e)
+  if (handBackOffered.get(agentId) === false) return yield* say(e, report)
   return yield* handBack(e, report, id => handedBack.set(e.turnId, { id, report }))
 }
 
@@ -301,6 +308,13 @@ export const register: Register = on => {
     }
     return spawned
   })
+
+  // Learn, without changing it, whether each run of a delegate is offered the hand-back tool.
+  on('tool.offer', { tool: 'SubagentHandback' }, async ($, e, next) => {
+    const offered = await next(e)
+    if (e.agentId !== undefined && backendOfType(e.subagentType) !== undefined) handBackOffered.set(e.agentId, offered.isOffered)
+    return offered
+  }).catch(($, e, next) => next(e))
 
   on('turn.step', async function* ($, e, next) {
     if (e.agentId === undefined) return yield* next(e)

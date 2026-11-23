@@ -13,7 +13,7 @@
 import type { EngineInterface, Register, TurnStepInput } from 'claude-code'
 import type { Progress } from '../types'
 import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './agents'
-import { endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
+import { HANDBACK, endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
 import { oneLine, runTurn, type ApprovalRequest } from './bridge'
 import { takeOptions } from './options'
 import { grantFor, type Backend } from './permissions'
@@ -190,9 +190,12 @@ const backendArg = (text: unknown): string[] => {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    // The model of these agents is never called, so they need no tools: the one listed is
+    // the hand-back tool, which the plugin calls for them. An empty list would mean every
+    // tool, and the placeholder model would get them all if this plugin ever failed to
+    // answer a step.
     for (const backend of BACKENDS) {
-      const spec = { ...AGENT_SPECS[backend], model: 'haiku', omitClaudeMd: true as const }
-      await $.agent.register({ ...spec, tools: [] }).catch(() => $.agent.register(spec))
+      await $.agent.register({ ...AGENT_SPECS[backend], model: 'haiku', omitClaudeMd: true, tools: [HANDBACK] })
     }
     await $.tool.register({
       name: 'models',

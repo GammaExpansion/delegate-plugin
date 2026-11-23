@@ -328,10 +328,12 @@ export const register: Register = on => {
       value.status === 'running'
         ? `${value.agent} · ${elapsed(Date.now() - value.startedAt)} · ${value.line}`
         : `${value.agent} · ${value.status} · ${elapsed((value.endedAt ?? Date.now()) - value.startedAt)}`
+    // A border on the Box that holds the row and the line asks for a card under the row,
+    // which mobile apps draw in full (a plain line they fold behind a tap).
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" borderStyle="round" paddingX={1}>
         {row}
-        <Text dimColor>{`  ⎿ ${line}`}</Text>
+        <Text>{line}</Text>
       </Box>
     )
   })

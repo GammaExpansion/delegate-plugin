@@ -172,7 +172,7 @@ async function cmdRun() {
   if (traceFile) result.notes = [...(result.notes ?? []), `the JSON-RPC trace of this turn is in ${traceFile}`];
   const report = renderReport({
     backend,
-    permission: request.permission,
+    permission: result.permission ?? request.permission,
     sandbox: request.sandbox ?? null,
     approvals: request.approvals,
     mode: request.mode ?? null,

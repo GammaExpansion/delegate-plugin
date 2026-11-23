@@ -68,4 +68,8 @@ test('an option the backend lacks, or Codex read-only without its sandbox, is re
   })
   expect('error' in askedFor('codex', base, null, 'disabled')).toBe(true)
   expect('error' in askedFor('agy', grantFor('agy', 'default'), null, 'maybe')).toBe(true)
+  // agy's auto has its sandbox built in, whether the mode gives it or the task asks for it.
+  expect('error' in askedFor('agy', grantFor('agy', 'auto'), null, 'disabled')).toBe(true)
+  expect('error' in askedFor('agy', grantFor('agy', 'default'), 'auto', 'disabled')).toBe(true)
+  expect('error' in askedFor('agy', grantFor('agy', 'auto'), 'accept-edits', 'disabled')).toBe(false)
 })

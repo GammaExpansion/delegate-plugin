@@ -12,7 +12,8 @@
 //   bypassPermissions  full-access        skip-permissions   (nothing is asked)
 //   dontAsk            read-only          default            declined
 //
-// A mode this table does not know is taken as default.
+// A mode this table does not know is taken as default. Where agy does not offer its auto
+// mode, the backend runs the turn with accept-edits and says so in the report.
 //
 // A task may ask for another option, or another sandbox, on its prompt's first line
 // (options.ts). What asks for less than the mode gives is taken as it is; what asks for more
@@ -100,6 +101,9 @@ export function askedFor(backend: Backend, base: Grant, permission: string | nul
   }
   if (backend === 'codex' && option === 'read-only' && box === 'disabled') {
     return { error: "Codex's read-only is its sandbox, so it cannot run with --sandbox disabled. Pick another --permission." }
+  }
+  if (backend === 'agy' && option === 'auto' && box === 'disabled') {
+    return { error: "Antigravity's auto runs its commands in agy's sandbox, so it cannot run with --sandbox disabled. Pick another --permission." }
   }
   const rank = RANK[backend]
   const wider =

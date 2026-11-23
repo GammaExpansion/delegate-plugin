@@ -45,7 +45,7 @@ Only when the user asks for it, put `--permission <option>` and `--sandbox enabl
 | Backend     | `--permission` options, from least to most                        | `--sandbox`                                                        |
 | ----------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
 | Codex       | `read-only`, `ask-for-approval`, `approve-for-me`, `full-access` | `disabled` runs commands without Codex's sandbox (not with `read-only`); `enabled` keeps one even with `full-access` |
-| Antigravity | `plan`, `default`, `accept-edits`, `auto`, `skip-permissions`     | `enabled` turns on agy's terminal sandbox; it has none otherwise   |
+| Antigravity | `plan`, `default`, `accept-edits`, `auto`, `skip-permissions`     | `enabled` turns on agy's terminal sandbox; it has none otherwise, except in `auto`, which always has it (so not `disabled` with `auto`) |
 
 Less than this conversation's mode gives is taken as it is. More (a higher option, or Codex without its sandbox) is put to the user in a question first, and holds for that one turn: write the options again on a follow-up that needs them. Never write them on your own to get past a refusal.
 
@@ -67,4 +67,6 @@ A report is a headline (agent, model, outcome, time, permission option), then an
 - After a review, stop and let the user choose what to fix.
 - If the run failed or was stopped, say so. Do not do the task yourself and present it as the delegate's.
 - A `note:` that a command was left running means it is still running on this machine. Tell the user.
+- A `note:` that agy does not offer its auto mode means the turn ran with `accept-edits`, so its commands were declined. Tell the user; do not add `--permission` on your own to get around it.
+- In auto mode a report arrives under Claude Code's note that its classifier was unavailable for the subagent's work. That is expected for a delegate: check the work as you would anyway.
 - If a backend is missing or not logged in, point the user to `/delegate:setup`.

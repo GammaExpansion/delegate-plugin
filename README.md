@@ -176,7 +176,7 @@ In auto mode Claude Code asks you nothing and leaves it to its classifier; a del
 | `auto`             | Edits files and runs commands.                                   | What it judges risky.                                |
 | `skip-permissions` | Everything (`--dangerously-skip-permissions`).                   | Nothing.                                             |
 
-agy has a sandbox of its own, off unless asked for: `--sandbox enabled` restricts its terminal.
+agy has a sandbox of its own, off unless asked for: `--sandbox enabled` restricts its terminal. Its `auto` always runs commands in that sandbox, so `auto` cannot go with `--sandbox disabled`. Where agy does not offer `auto` (its sandbox cannot run on the machine, or the account is not offered the mode), the turn runs with `accept-edits` instead, and the report says so.
 
 ### When a delegate asks
 
@@ -287,6 +287,7 @@ Then add it to `hooks/agents.ts` (its agent type), `hooks/permissions.ts` (its o
 
 - Mods are an early-access part of Claude Code, and their API may change between releases.
 - In auto mode the report goes through Claude Code's internal hand-back tool, which is not part of the documented API.
+- In auto mode every report arrives under a note that the auto mode classifier was unavailable when reviewing the subagent's work. Claude Code reviews a subagent's report through its own model's reply, and a delegate's report is not written by that model, so there is nothing for it to review. The note is accurate: the delegate's work was not reviewed by Claude Code, and Claude is told to check it. The plugin cannot remove it; in other modes no such review runs and no note appears.
 - The subagent's panel names the placeholder model of the agent type (Haiku), not the backend's model. The report's headline names the real one.
 - Claude Code's question dialog always has a field for text; it cannot be left out.
 - What you set up in a backend itself still applies on top of the mode's option: Codex's exec-policy rules and MCP approval settings, agy's allow-lists. A mode is not a guarantee against them.

@@ -58,7 +58,9 @@ export function renderReport({ backend, permission, sandbox, approvals, mode, mo
     if (declined.length > 10) lines.push(`- … ${declined.length - 10} more`);
     lines.push(declinedNote(approvals, mode));
   }
-  lines.push("", result.text ? result.text : result.status === "cancelled" ? "(no answer: the run was stopped)" : "(no message)");
+  // A turn that failed without a word has its error above, and nothing to add here.
+  const answer = result.text || (result.status === "cancelled" ? "(no answer: the run was stopped)" : result.error ? null : "(no message)");
+  if (answer !== null) lines.push("", answer);
   return lines.join("\n");
 }
 

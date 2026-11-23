@@ -45,7 +45,7 @@ type BackendEvent =
 type RunResult = { status: 'completed' | 'cancelled' | 'failed'; sessionId: string | null; model: string | null }
 
 type BridgeEvent =
-  | { type: 'ready'; controlDir: string }
+  | { type: 'ready'; controlDir: string; token: string }
   | { type: 'event'; event: BackendEvent }
   | { type: 'approval'; id: number; request: ApprovalRequest }
   | { type: 'result'; result: RunResult; report: string }
@@ -92,6 +92,9 @@ export async function runTurn($: EngineInterface, request: TurnRequest, hooks: T
   })
   const outcome: TurnOutcome = { report: null, status: null, error: null }
   let controlDir: string | null = null
+  // Every file written to the control directory carries the turn's token, which the bridge
+  // sent on stdout only: a delegate that can write there cannot answer for the user.
+  let token: string | null = null
   // Once the bridge has ended, an answer that comes late is not written: its directory is gone.
   let ended = false
   let stdout = ''
@@ -103,7 +106,7 @@ export async function runTurn($: EngineInterface, request: TurnRequest, hooks: T
   const answer = async (id: number, ask: ApprovalRequest) => {
     const picked = await hooks.onApproval(ask).catch(() => null)
     if (ended || controlDir === null) return
-    await $.fs.write(`${controlDir}/answer-${id}.json`, JSON.stringify(picked ?? {}))
+    await $.fs.write(`${controlDir}/answer-${id}.json`, JSON.stringify({ ...(picked ?? {}), token }))
   }
 
   const handle = (line: string) => {
@@ -117,6 +120,7 @@ export async function runTurn($: EngineInterface, request: TurnRequest, hooks: T
     switch (event.type) {
       case 'ready':
         controlDir = event.controlDir
+        token = event.token
         return
       case 'event': {
         const inner = event.event

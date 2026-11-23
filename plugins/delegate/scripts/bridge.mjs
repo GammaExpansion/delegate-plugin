@@ -11,17 +11,23 @@
 // `run` and the module talk through a control directory the bridge makes for the turn and
 // names in its first event. Since stdin is closed, that is the way back: the module writes
 // `answer-<id>.json` there to answer a request for approval, and `cancel` to stop the
-// turn. The bridge looks for them a few times a second; an answer file not yet complete
-// is passed over and read again.
+// turn. The bridge looks for them a few times a second.
+//
+// The directory is in the system temp directory, which a backend's sandbox can write to,
+// so a delegate could write an answer of its own there. Every file the bridge reads must
+// carry the turn's token, which goes out only on stdout, to the module; a file without
+// it, or one not yet complete, is passed over.
 //
 // Events, one JSON object per line:
-//   { type: "ready", controlDir }
+//   { type: "ready", controlDir, token }
 //   { type: "event", event }                 a BackendEvent (see lib/backends/index.mjs)
 //   { type: "approval", id, request }        an ApprovalRequest; answer with answer-<id>.json
-//                                            holding { "choice": "<id of one of request.choices>" },
-//                                            or { "text": "..." }: the user's own words, which
-//                                            decline the request and are passed on
+//                                            holding { "token", "choice": "<id of one of request.choices>" },
+//                                            or { "token", "text": "..." }: the user's own words,
+//                                            which decline the request and are passed on
 //   { type: "result", result, report }       the RunResult, and the report for Claude
+// and `cancel` holds { "token" }.
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -72,6 +78,7 @@ async function cmdRun() {
   const request = JSON.parse(await readStdin());
   const backend = getBackend(request.backend);
   const controlDir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-ctl-"));
+  const token = randomBytes(24).toString("hex");
   const controller = new AbortController();
   const pending = new Map();
   let nextId = 1;
@@ -82,24 +89,24 @@ async function cmdRun() {
   };
   controller.signal.addEventListener("abort", settleAll, { once: true });
 
-  /** An answer file's content once it is there and complete, else null. */
-  const readAnswer = (id) => {
+  /** A control file's content if it is complete and carries the turn's token, else null. */
+  const readSigned = (name) => {
     try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(controlDir, `answer-${id}.json`), "utf8"));
-      return parsed && typeof parsed === "object" ? parsed : null;
+      const parsed = JSON.parse(fs.readFileSync(path.join(controlDir, name), "utf8"));
+      return parsed && typeof parsed === "object" && parsed.token === token ? parsed : null;
     } catch {
       return null;
     }
   };
 
   const poll = setInterval(() => {
-    if (!controller.signal.aborted && fs.existsSync(path.join(controlDir, "cancel"))) controller.abort();
+    if (!controller.signal.aborted && readSigned("cancel")) controller.abort();
     for (const [id, resolve] of pending) {
-      const written = readAnswer(id);
-      if (!written) continue;
+      const signed = readSigned(`answer-${id}.json`);
+      if (!signed) continue;
       let answer = null;
-      if (typeof written.choice === "string") answer = written.choice;
-      else if (typeof written.text === "string" && written.text.trim()) answer = { text: written.text };
+      if (typeof signed.choice === "string") answer = signed.choice;
+      else if (typeof signed.text === "string" && signed.text.trim()) answer = { text: signed.text };
       pending.delete(id);
       resolve(answer);
     }
@@ -111,7 +118,7 @@ async function cmdRun() {
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
-  emit({ type: "ready", controlDir });
+  emit({ type: "ready", controlDir, token });
 
   const startedAt = Date.now();
   let shown = { model: request.model ?? null, effort: null };

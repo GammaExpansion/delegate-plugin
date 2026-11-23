@@ -101,18 +101,21 @@ function toAction(item) {
 }
 
 /**
- * Codex's own answers to a request for approval of a command or a file change, as the
- * user is offered them: the declining ones first. "acceptForSession" lasts as long as the
- * app-server, which is this one turn. Codex's persistent rules (an exec policy or network
- * policy amendment) are not offered: a question takes four answers at most.
+ * Codex's own answers to a request for approval, as the user is offered them, in the
+ * words of Codex's own approval prompt where it has them: the declining ones first.
+ * "acceptForSession" is marked lasting: Codex keeps it only as long as its app-server, one
+ * turn here, so the plugin remembers it for the rest of the conversation (register.tsx).
+ * Codex's persistent rules (an exec policy or network policy amendment) are not offered.
  */
-const DECISIONS = [
-  { id: "decline", label: "Decline", allow: false },
-  { id: "accept", label: "Accept", allow: true },
-  { id: "acceptForSession", label: "Accept for this turn", allow: true },
-  { id: "cancel", label: "Decline and stop", allow: false }
+const DECISIONS = (lastingLabel) => [
+  { id: "decline", label: "No, continue without it", allow: false },
+  { id: "accept", label: "Yes, just this once", allow: true },
+  { id: "acceptForSession", label: lastingLabel, allow: true, lasting: true },
+  { id: "cancel", label: "No, and stop Codex", allow: false, stop: true }
 ];
-const PLAIN_DECISIONS = DECISIONS.filter((choice) => choice.id === "decline" || choice.id === "accept");
+const COMMAND_DECISIONS = DECISIONS("Yes, and don't ask again for this command in this session");
+const FILE_DECISIONS = DECISIONS("Yes, and don't ask again for these files");
+const PLAIN_DECISIONS = COMMAND_DECISIONS.filter((choice) => choice.id === "decline" || choice.id === "accept");
 
 /**
  * What a request for approval is about, for whoever is asked: a command and where it runs,
@@ -126,7 +129,7 @@ function approvalRequest(method, params, item) {
       title: params?.command ?? item?.command ?? "a command",
       cwd: params?.cwd ?? item?.cwd ?? null,
       reason: params?.reason ?? null,
-      choices: DECISIONS
+      choices: COMMAND_DECISIONS
     };
   }
   if (method === "item/fileChange/requestApproval") {
@@ -136,7 +139,7 @@ function approvalRequest(method, params, item) {
       title: changes.length ? changes.join(", ") : params?.reason ?? "edit files",
       cwd: null,
       reason: params?.reason ?? null,
-      choices: DECISIONS
+      choices: FILE_DECISIONS
     };
   }
   return { kind: "approval", title: params?.reason ?? method, cwd: null, reason: null, choices: PLAIN_DECISIONS };

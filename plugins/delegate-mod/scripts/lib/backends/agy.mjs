@@ -166,17 +166,41 @@ function fetchModels() {
   return models;
 }
 
-// agy's options for one request, as the user is offered them: refusals first, at most four.
+// agy offers its own options on a request (in practice "Allow" and "Deny": allow_once and
+// reject_once). The user is offered the same four answers as for Codex, each standing for
+// one of agy's options: no, yes once, yes and don't ask again (agy's allow_always where it
+// has one, else allow_once, which the plugin remembers for the conversation), and no with
+// the turn stopped. Without an allow_once and a reject_once to stand on, agy's own
+// options are offered as they are, refusals first.
 const KIND_ORDER = ["reject_once", "reject_always", "allow_once", "allow_always"];
 const kindRank = (kind) => (KIND_ORDER.includes(kind) ? KIND_ORDER.indexOf(kind) : String(kind).startsWith("reject") ? 1.5 : 3.5);
+const FILE_KINDS = new Set(["edit", "delete", "move"]);
 
-/** @returns {{ id: string, label: string, allow: boolean }[]} */
-function choicesOf(options) {
-  return [...options]
-    .filter((option) => option?.optionId)
+/** @returns {{ id: string, label: string, allow: boolean, lasting?: boolean, optionId: string, stop?: boolean }[]} */
+function choicesOf(options, kind) {
+  const usable = options.filter((option) => option?.optionId);
+  const once = usable.find((option) => option.kind === "allow_once");
+  const always = usable.find((option) => option.kind === "allow_always");
+  const reject = usable.find((option) => option.kind === "reject_once");
+  if (once && reject) {
+    const what = kind === "execute" ? "for this command" : FILE_KINDS.has(kind) ? "for these files" : "for this";
+    return [
+      { id: "decline", label: "No, continue without it", allow: false, optionId: reject.optionId },
+      { id: "accept", label: "Yes, just this once", allow: true, optionId: once.optionId },
+      { id: "acceptForSession", label: `Yes, and don't ask again ${what} in this session`, allow: true, lasting: true, optionId: (always ?? once).optionId },
+      { id: "cancel", label: "No, and stop Antigravity", allow: false, optionId: reject.optionId, stop: true }
+    ];
+  }
+  return [...usable]
     .sort((a, b) => kindRank(a.kind) - kindRank(b.kind))
     .slice(0, 4)
-    .map((option) => ({ id: option.optionId, label: option.name || option.kind, allow: String(option.kind).startsWith("allow") }));
+    .map((option) => ({
+      id: option.optionId,
+      label: option.name || option.kind,
+      allow: String(option.kind).startsWith("allow"),
+      lasting: option.kind === "allow_always",
+      optionId: option.optionId
+    }));
 }
 
 /**
@@ -377,7 +401,8 @@ export const agyBackend = {
       let allow = Boolean(policy.allowAll || harmless);
       let asked = false;
       let option = null;
-      const choices = choicesOf(params?.options ?? []);
+      let stop = false;
+      const choices = choicesOf(params?.options ?? [], call.kind ?? entry.kind);
       if (!allow && onApproval && !signal?.aborted && choices.some((choice) => choice.allow)) {
         asked = true;
         const answer = await onApproval({ kind: entry.kind ?? "tool", title: entry.title, cwd: null, reason: paths.length ? paths.join(", ") : null, choices });
@@ -386,7 +411,8 @@ export const agyBackend = {
         const picked =
           typeof answer === "string" ? choices.find((choice) => choice.id === answer) : answer === true ? choices.find((choice) => choice.allow) : null;
         allow = Boolean(picked?.allow);
-        option = picked ? (params?.options ?? []).find((candidate) => candidate.optionId === picked.id) ?? null : null;
+        stop = Boolean(picked?.stop);
+        option = picked ? (params?.options ?? []).find((candidate) => candidate.optionId === picked.optionId) ?? null : null;
       }
       option ??= pickOption(params?.options ?? [], allow);
       const allowed = allow && Boolean(option);
@@ -396,6 +422,8 @@ export const agyBackend = {
         unanswered.push(what);
         onEvent({ type: "note", text: `declined (permission ${permissionName}, ${asked ? "the user said no" : "nobody to ask"}): ${what}` });
       }
+      // "No, and stop": the refusal goes out first, then the turn is cancelled.
+      if (stop) setTimeout(cancel, 0);
       if (!option) return { outcome: { outcome: "cancelled" } };
       return { outcome: { outcome: "selected", optionId: option.optionId } };
     };

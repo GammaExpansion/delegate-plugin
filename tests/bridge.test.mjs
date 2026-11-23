@@ -76,7 +76,16 @@ test("a request for approval is put to the caller with Codex's own answers, and 
   assert.deepEqual({ ...asked[0], choices: undefined }, { kind: "command", title: "touch b.txt", cwd: null, reason: null, choices: undefined });
   assert.deepEqual(
     asked[0].choices.map(({ id, label }) => `${id}=${label}`),
-    ["decline=Decline", "accept=Accept", "acceptForSession=Accept for this turn", "cancel=Decline and stop"]
+    [
+      "decline=No, continue without it",
+      "accept=Yes, just this once",
+      "acceptForSession=Yes, and don't ask again for this command in this session",
+      "cancel=No, and stop Codex"
+    ]
+  );
+  assert.deepEqual(
+    asked[0].choices.map((choice) => Boolean(choice.lasting)),
+    [false, false, true, false]
   );
   assert.equal(result.result.text, "the answer was accept");
   assert.doesNotMatch(result.report, /declined/);
@@ -151,13 +160,21 @@ test("agy: an allowed request runs, and the answer comes after it", async () => 
       onEvent: (event, { controlDir }) => {
         if (event.type !== "approval") return;
         asked.push(event.request);
-        answer(controlDir, event.id, { choice: "yes" });
+        answer(controlDir, event.id, { choice: "accept" });
       }
     }
   );
   assert.deepEqual(asked.map(({ kind, title }) => ({ kind, title })), [{ kind: "execute", title: "npm test" }]);
-  // agy's own options, its refusal first.
-  assert.deepEqual(asked[0].choices.map(({ id, label }) => `${id}=${label}`), ["no=Reject", "yes=Allow"]);
+  // The same answers as for Codex, each standing for one of agy's own options.
+  assert.deepEqual(
+    asked[0].choices.map(({ id, label, optionId }) => `${id}=${label}=${optionId}`),
+    [
+      "decline=No, continue without it=no",
+      "accept=Yes, just this once=yes",
+      "acceptForSession=Yes, and don't ask again for this command in this session=yes",
+      "cancel=No, and stop Antigravity=no"
+    ]
+  );
   assert.equal(result.result.status, "completed");
   assert.equal(result.result.text, "Tests passed: 40/40");
   assert.match(result.report, /^\[delegate\] Gemini Agent \(fake-gemini\) · completed/);
@@ -168,11 +185,23 @@ test("agy: a refused request is declined, and agy is asked to finish without it"
     { backend: "agy", permission: "default", approvals: "ask" },
     {
       env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
-      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { choice: "no" })
+      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { choice: "decline" })
     }
   );
   assert.equal(result.result.text, "I could not run the tests.");
   assert.match(result.report, /declined \(1\):\n- \[execute\] npm test \(pending, permission denied\)/);
+});
+
+test("agy: \"No, and stop\" refuses the request and ends the turn", async () => {
+  const { result } = await runTurn(
+    { backend: "agy", permission: "default", approvals: "ask" },
+    {
+      env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
+      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { choice: "cancel" })
+    }
+  );
+  assert.equal(result.result.status, "cancelled");
+  assert.match(result.report, /declined \(1\):\n- \[execute\] npm test/);
 });
 
 test("agy: words in place of an answer decline the request and reach agy after the turn", async () => {

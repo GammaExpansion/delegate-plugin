@@ -21,7 +21,8 @@ export type TurnRequest = {
 
 export type Action = { kind: string; title: string; status?: string; exitCode?: number | null; permission?: string }
 
-export type Choice = { id: string; label: string; allow: boolean }
+/** An answer the user is offered. A lasting one also allows the same request later on; one that stops ends the turn. */
+export type Choice = { id: string; label: string; allow: boolean; lasting?: boolean; stop?: boolean }
 
 export type ApprovalRequest = {
   kind: string

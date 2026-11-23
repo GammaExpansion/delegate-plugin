@@ -25,6 +25,12 @@ type Spawn = { backend: Backend; mode: string | undefined; rowId: string }
 type Conversation = { backend: Backend; sessionId: string; model: string | null; effort: string | null; at: number }
 
 const spawns = new Map<string, Spawn>()
+/**
+ * Requests the user allowed with a lasting answer ("don't ask again for this command in
+ * this session"), by delegate conversation. The agent keeps such an answer only while its
+ * process lives, one turn; the plugin keeps it for the conversation, while it is loaded.
+ */
+const lasting = new Map<string, Map<string, string>>()
 const notOurs = new Set<string>()
 /** Hand-back calls made, by turn, to check on the step after. */
 const handedBack = new Map<string, { id: string; report: string }>()
@@ -82,6 +88,7 @@ async function saveConversation($: EngineInterface, agentId: string, conversatio
 async function askUser(
   $: EngineInterface,
   backend: Backend,
+  agentId: string,
   request: ApprovalRequest,
   show: (line: string) => void,
   note: (line: string) => void,
@@ -93,22 +100,34 @@ async function askUser(
         ? `edit ${oneLine(request.title, 300)}`
         : `do this (${request.kind}): ${oneLine(request.title, 300)}`
   const why = request.reason ? ` (${oneLine(request.reason, 200)})` : ''
-  const short = oneLine(what, 100)
   const choices = request.choices.slice(0, 4)
   if (choices.length < 2) return null
-  show(`waiting for you: ${short}`)
+  const key = `${request.kind}\u0000${request.title}`
+  const remembered = lasting.get(agentId)?.get(key)
+  if (remembered !== undefined && choices.some(choice => choice.id === remembered)) {
+    note(`${AGENT_NAME[backend]} was allowed to ${what} without asking: earlier in this conversation the user said not to ask again.`)
+    return { choice: remembered }
+  }
+  show(`waiting for you: ${oneLine(what, 100)}`)
   try {
-    const answer = await $.ui.ask(`${AGENT_NAME[backend]} wants to ${what}${why}. What should it do?`, {
-      header: PRODUCT[backend],
-      options: choices.map(choice => choice.label),
-    })
+    const answer = await $.ui.ask(
+      `${AGENT_NAME[backend]} wants to ${what}${why}. Allow it? Or type what ${PRODUCT[backend]} should do instead.`,
+      { header: PRODUCT[backend], options: choices.map(choice => choice.label) },
+    )
     const picked = choices.find(choice => choice.label === answer)
-    if (picked !== undefined) return { choice: picked.id }
-    note(`the user did not allow ${AGENT_NAME[backend]} to ${short}, and wrote: "${oneLine(answer, 300)}". The words were passed on to ${PRODUCT[backend]}.`)
+    if (picked !== undefined) {
+      if (picked.stop === true) note(`the user did not allow ${AGENT_NAME[backend]} to ${what}, and stopped it.`)
+      if (picked.lasting === true && picked.allow) {
+        if (!lasting.has(agentId)) lasting.set(agentId, new Map())
+        lasting.get(agentId)?.set(key, picked.id)
+      }
+      return { choice: picked.id }
+    }
+    note(`the user did not allow ${AGENT_NAME[backend]} to ${what}, and wrote: "${oneLine(answer, 300)}". The words were passed on to ${PRODUCT[backend]}.`)
     return { text: answer }
   } catch {
     // Dismissed, or nobody to ask (claude -p).
-    note(`asked whether ${AGENT_NAME[backend]} may ${short}, the question was closed without an answer, so it was declined.`)
+    note(`asked whether ${AGENT_NAME[backend]} may ${what}, the question was closed without an answer, so it was declined.`)
     return null
   }
 }
@@ -214,7 +233,7 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
       onActivity: line => show('running', line),
       onApproval: request =>
         grant.approvals === 'ask'
-          ? askUser($, backend, request, line => show('running', line), line => notes.push(line))
+          ? askUser($, backend, agentId, request, line => show('running', line), line => notes.push(line))
           : Promise.resolve(null),
     },
   )

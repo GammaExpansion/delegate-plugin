@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { takeOptions } from '../hooks/options'
-import { grantFor } from '../hooks/permissions'
+import { askedFor, describe, grantFor } from '../hooks/permissions'
 
 test('each permission mode gives each backend its closest option', async () => {
   expect(grantFor('codex', 'plan')).toEqual({ mode: 'plan', permission: 'read-only', approvals: 'decline', sandbox: null })
@@ -19,22 +19,50 @@ test('a mode that is missing or unknown is taken as default', async () => {
   expect(grantFor('agy', 'constructor').mode).toBe('default')
 })
 
-test('the model and effort come off the first line, and the task is left as it was', async () => {
-  const taken = takeOptions('--model gpt-6.2-astra --effort=high\nReview src/auth.ts\n--model inside the task stays')
+test('the options come off the first line, and the task is left as it was', async () => {
+  const taken = takeOptions('--model gpt-6.2-astra --effort=high --permission full-access --sandbox disabled\nReview src/auth.ts\n--model inside the task stays')
   expect(taken.model).toBe('gpt-6.2-astra')
   expect(taken.effort).toBe('high')
+  expect(taken.permission).toBe('full-access')
+  expect(taken.sandbox).toBe('disabled')
   expect(taken.task).toBe('Review src/auth.ts\n--model inside the task stays')
-  expect(taken.setAside).toEqual([])
-})
-
-test('--permission and --sandbox are set aside, and any other option is part of the task', async () => {
-  const retired = takeOptions('--permission full-access --sandbox disabled fix it')
-  expect(retired.setAside).toEqual(['--permission full-access', '--sandbox disabled'])
-  expect(retired.task).toBe('fix it')
 
   const other = takeOptions('--verbose please explain math.js')
   expect(other.model).toBe(null)
   expect(other.task).toBe('--verbose please explain math.js')
+})
+
+test('a task that asks for more than the mode gives is told apart from one that asks for less', async () => {
+  const auto = grantFor('codex', 'auto')
+  const full = askedFor('codex', auto, 'full-access', null)
+  expect(full).toEqual({ grant: { ...auto, permission: 'full-access', sandbox: null }, wider: true })
+  // Without the sandbox is more, even at the same option.
+  expect(askedFor('codex', auto, null, 'disabled')).toEqual({ grant: { ...auto, sandbox: 'disabled' }, wider: true })
+  // Less, or the same, is not.
+  expect(askedFor('codex', auto, 'read-only', null)).toEqual({ grant: { ...auto, permission: 'read-only' }, wider: false })
+  expect(askedFor('codex', grantFor('codex', 'bypassPermissions'), 'full-access', 'enabled')).toEqual({
+    grant: { ...grantFor('codex', 'bypassPermissions'), sandbox: 'enabled' },
+    wider: false,
+  })
+  // agy has no sandbox unless asked: enabling one is less, never more.
+  expect(askedFor('agy', grantFor('agy', 'acceptEdits'), null, 'enabled')).toEqual({
+    grant: { ...grantFor('agy', 'acceptEdits'), sandbox: 'enabled' },
+    wider: false,
+  })
+  expect(askedFor('agy', grantFor('agy', 'acceptEdits'), 'skip-permissions', null)).toEqual({
+    grant: { ...grantFor('agy', 'acceptEdits'), permission: 'skip-permissions' },
+    wider: true,
+  })
+  if ('grant' in full) expect(describe('codex', full.grant)).toBe('full-access, no sandbox')
+})
+
+test('an option the backend lacks, or Codex read-only without its sandbox, is refused', async () => {
+  const base = grantFor('codex', 'default')
+  expect(askedFor('codex', base, 'auto', null)).toEqual({
+    error: 'Codex has no permission option "auto". Its options: read-only, ask-for-approval, approve-for-me, full-access.',
+  })
+  expect('error' in askedFor('codex', base, null, 'disabled')).toBe(true)
+  expect('error' in askedFor('agy', grantFor('agy', 'default'), null, 'maybe')).toBe(true)
 })
 
 test('codexSandbox off takes the sandbox away only where Codex may change things', async () => {

@@ -1,36 +1,28 @@
 // The options a prompt may carry on its first line, before the task:
 //
-//     --model gpt-6.2-astra --effort high
-//     Review the change in src/auth.ts ...
+//     --model gpt-6.2-astra --effort high --permission full-access --sandbox disabled
+//     Build the app and install it on the emulator with adb ...
 //
-// Only the model and the effort are chosen this way. What a delegate may do follows the
-// conversation's permission mode, so --permission and --sandbox, which earlier versions
-// took, are read and set aside with a note. Reading stops at the first thing that is not
+// --model and --effort pick the model. --permission and --sandbox ask for something other
+// than what the conversation's permission mode gives (permissions.ts): less is taken as it
+// is, and more only once the user allows it. Reading stops at the first thing that is not
 // one of these: the rest is the task, unchanged.
 
 const OPTION_AT_START = /^\s*--([a-z][a-z-]*)(?:=|[ \t]+)(?:"([^"\n]*)"|'([^'\n]*)'|(\S+))/
-const RETIRED = new Set(['permission', 'sandbox'])
+const NAMES = ['model', 'effort', 'permission', 'sandbox'] as const
+type Name = (typeof NAMES)[number]
 
-export type Leading = {
-  model: string | null
-  effort: string | null
-  /** Options that are no longer taken, as written: "--permission read-only". */
-  setAside: string[]
-  task: string
-}
+export type Leading = Record<Name, string | null> & { task: string }
 
 export function takeOptions(text: string): Leading {
-  const taken: Leading = { model: null, effort: null, setAside: [], task: '' }
+  const taken: Leading = { model: null, effort: null, permission: null, sandbox: null, task: '' }
   let rest = text
   for (;;) {
     const match = OPTION_AT_START.exec(rest)
     if (match === null) break
-    const name = match[1] ?? ''
-    const value = match[2] ?? match[3] ?? match[4] ?? ''
-    if (name === 'model') taken.model = value
-    else if (name === 'effort') taken.effort = value
-    else if (RETIRED.has(name)) taken.setAside.push(`--${name} ${value}`)
-    else break
+    const name = NAMES.find(known => known === match[1])
+    if (name === undefined) break
+    taken[name] = match[2] ?? match[3] ?? match[4] ?? ''
     rest = rest.slice(match[0].length)
   }
   taken.task = rest.trim()

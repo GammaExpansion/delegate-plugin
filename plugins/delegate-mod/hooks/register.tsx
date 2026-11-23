@@ -16,7 +16,7 @@ import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './age
 import { endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
 import { oneLine, runTurn, type ApprovalAnswer, type ApprovalRequest } from './bridge'
 import { takeOptions } from './options'
-import { grantFor, type Backend, type Settings } from './permissions'
+import { askedFor, describe, grantFor, type Backend, type Grant, type Settings } from './permissions'
 
 /** What the latest spawn of a delegate said: the backend, the mode, and the row it came from. */
 type Spawn = { backend: Backend; mode: string | undefined; rowId: string }
@@ -113,6 +113,47 @@ async function askUser(
   }
 }
 
+/**
+ * Puts it to the user when a task asks for more than the conversation's mode gives: a
+ * higher option, or commands run without the sandbox. Only their pick of Allow takes it,
+ * for this one turn; anything else keeps the mode's grant. In dontAsk mode nobody is asked.
+ */
+async function confirmWider(
+  $: EngineInterface,
+  backend: Backend,
+  base: Grant,
+  wanted: Grant,
+  note: (line: string) => void,
+): Promise<Grant> {
+  const from = describe(backend, base)
+  const to = describe(backend, wanted)
+  if (base.mode === 'dontAsk') {
+    note(`the task asked for ${to}, more than ${base.mode} mode gives, and nobody is asked in that mode, so it ran with ${from}.`)
+    return base
+  }
+  const keep = `Keep ${from}`
+  const allow = `Allow ${to}`
+  try {
+    const answer = await $.ui.ask(
+      `This conversation is in ${base.mode} mode, which gives ${AGENT_NAME[backend]} ${from}. The task asks for ${to}. Allow that for this turn?`,
+      // Keep first, so that an answer the user did not pick themselves never widens.
+      { header: PRODUCT[backend], options: [keep, allow] },
+    )
+    if (answer === allow) {
+      note(`ran with ${to}, which the task asked for and the user allowed for this turn (${base.mode} mode gives ${from}).`)
+      return wanted
+    }
+    note(
+      answer === keep
+        ? `the task asked for ${to}; the user kept ${from}.`
+        : `the task asked for ${to}; the user answered "${oneLine(answer, 200)}", so it ran with ${from}.`,
+    )
+  } catch {
+    note(`the task asked for ${to}; the question was closed without an answer, so it ran with ${from}.`)
+  }
+  return base
+}
+
 /** The report with lines added under its headline. */
 function withNotes(report: string, notes: string[]): string {
   if (notes.length === 0) return report
@@ -123,9 +164,15 @@ function withNotes(report: string, notes: string[]): string {
 /** Runs one turn of a delegate on its backend and returns the report, or null if it was stopped. */
 async function runDelegate($: EngineInterface, agentId: string, backend: Backend, signal: AbortSignal, settings: Settings): Promise<string | null> {
   const spawn = spawns.get(agentId)
-  const grant = grantFor(backend, spawn?.mode, settings)
   const leading = takeOptions(await latestMessage($, agentId))
   if (leading.task === '') return `[delegate] ${AGENT_NAME[backend]} · failed\nerror: the prompt holds no task.`
+  const notes: string[] = []
+  let grant = grantFor(backend, spawn?.mode, settings)
+  if (leading.permission !== null || leading.sandbox !== null) {
+    const asked = askedFor(backend, grant, leading.permission, leading.sandbox)
+    if ('error' in asked) return `[delegate] ${AGENT_NAME[backend]} · failed\nerror: ${asked.error}`
+    grant = asked.wider ? await confirmWider($, backend, grant, asked.grant, line => notes.push(line)) : asked.grant
+  }
 
   const before = await loadConversation($, agentId)
   const model = leading.model ?? before?.model ?? null
@@ -141,7 +188,6 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
     $.state.set({ plugin: 'delegate', key: 'progress', id: spawn.rowId }, value).catch(() => {})
   }
   show('running', 'starting')
-  const notes: string[] = []
 
   const outcome = await runTurn(
     $,
@@ -179,9 +225,6 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
   }
   show(outcome.status ?? 'failed', outcome.error === null ? (outcome.status ?? 'done') : oneLine(outcome.error, 100))
 
-  if (leading.setAside.length > 0) {
-    notes.unshift(`${leading.setAside.join(', ')} was set aside. What a delegate may do follows this conversation's permission mode (${grant.mode}), which gave it ${grant.permission}.`)
-  }
   const report = withNotes(outcome.report ?? `[delegate] ${label} · failed\nerror: ${outcome.error ?? 'unknown'}`, notes)
   return report
 }

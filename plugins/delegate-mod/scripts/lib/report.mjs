@@ -47,7 +47,7 @@ function declinedNote(approvals, mode) {
  *   result: import("./backends/index.mjs").RunResult }} turn
  */
 export function renderReport({ backend, permission, sandbox, approvals, mode, model, effort, durationMs, result }) {
-  const option = sandbox === "disabled" ? `${permission}, no sandbox` : permission;
+  const option = sandbox === "disabled" ? `${permission}, no sandbox` : sandbox === "enabled" ? `${permission}, sandbox` : permission;
   const lines = [[`[delegate] ${agentLabel(backend, model, effort)}`, result.status, formatDuration(durationMs), option].join(" · ")];
   if (result.error) lines.push(`error: ${result.error}`);
   if (result.status === "cancelled" && !result.error) lines.push("note: the run was stopped before it finished.");

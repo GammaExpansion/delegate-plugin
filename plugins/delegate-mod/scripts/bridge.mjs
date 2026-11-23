@@ -57,7 +57,7 @@ function traceFileFor(backendName) {
  * @property {string} cwd
  * @property {string} prompt
  * @property {string} permission       one of the backend's own options
- * @property {"disabled" | null} [sandbox]   "disabled" to run without the option's sandbox
+ * @property {"enabled" | "disabled" | null} [sandbox]   "disabled" to run without the option's sandbox, "enabled" to add one
  * @property {"ask" | "decline"} approvals   whether requests beyond the option are put to the user
  * @property {string | null} [mode]    the conversation's permission mode, for the report
  * @property {string | null} [model]

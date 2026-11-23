@@ -40,7 +40,18 @@ It follows this conversation's permission mode, read every time the delegate sta
 
 Codex runs its commands in a sandbox. If the user has set the plugin option `codexSandbox` to `off`, Codex runs without it in accept-edits and auto mode, for work a sandbox stops (adb, an emulator, a build that writes outside the repository), and runs commands without asking; the report's headline then says `no sandbox`. Do not suggest turning the sandbox off yourself; if a delegate reports that its sandbox stopped such work, tell the user the option exists.
 
-What was declined is listed in the report. To let the delegate do it, the user switches this conversation to a mode that allows it; then continue the same subagent ("try again") and it carries on with what it knows. Do not ask the delegate to work around a refusal.
+### When the user asks for more, or less, for one task
+
+Only when the user asks for it, put `--permission <option>` and `--sandbox enabled|disabled` on the prompt's first line, next to `--model`:
+
+| Backend     | `--permission` options, from least to most                        | `--sandbox`                                                        |
+| ----------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Codex       | `read-only`, `ask-for-approval`, `approve-for-me`, `full-access` | `disabled` runs commands without Codex's sandbox (not with `read-only`); `enabled` keeps one even with `full-access` |
+| Antigravity | `plan`, `default`, `accept-edits`, `auto`, `skip-permissions`     | `enabled` turns on agy's terminal sandbox; it has none otherwise   |
+
+Less than this conversation's mode gives is taken as it is. More (a higher option, or Codex without its sandbox) is put to the user in a question first, and holds for that one turn: write the options again on a follow-up that needs them. Never write them on your own to get past a refusal.
+
+What was declined is listed in the report. To let the delegate do it, the user switches this conversation to a mode that allows it, or asks you to run that turn with more; then continue the same subagent ("try again") and it carries on with what it knows. Do not ask the delegate to work around a refusal.
 
 Before a delegate turn that can edit, check that its files do not overlap with files being edited here.
 

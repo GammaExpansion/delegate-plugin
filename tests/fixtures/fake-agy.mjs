@@ -13,6 +13,12 @@
 //                answer and ends its turn; the command never ends
 //   declined     agy asks to run a command, never reports the call as ended, and ends
 //                its turn without a word; told that nobody can approve, it answers
+//   ask          agy asks to run a command; allowed, it runs it and answers, and refused,
+//                it behaves as in "declined"; sent the user's words after the turn, it
+//                answers with them
+//   ask-always   the same, but agy offers only "Always allow" and no refusal
+//
+// With FAKE_AGY_LOAD_FAILS=1, session/load fails, as for a session that is gone.
 //
 // A resumed session (`session/load`) replays its history as updates. A real agy answers
 // the load while a long history is still on its way, which these two play out:
@@ -46,6 +52,7 @@ const answer = (id, text) => {
 
 let prompts = 0;
 let firstPromptId = null;
+let lastPrompt = "";
 
 /** One step of an earlier turn, the way agy replays it: a call that is already over, and text. */
 const replayStep = (n) => {
@@ -78,8 +85,9 @@ async function playTurn(id) {
     tool("in_progress", true, { title: "npm run dev", rawInput: { CommandLine: "npm run dev", IsDaemon: true, WaitMsBeforeAsync: 500 } });
     return answer(id, "The server is up.");
   }
-  if (scenario === "declined") {
+  if (scenario === "declined" || scenario === "ask" || scenario === "ask-always") {
     if (prompts > 1) {
+      if (scenario === "ask" && lastPrompt.includes("the user did not allow it")) return answer(id, `Heard: ${lastPrompt.split("\n").pop()}`);
       return answer(id, "I could not run the tests.");
     }
     firstPromptId = id;
@@ -90,10 +98,13 @@ async function playTurn(id) {
       params: {
         sessionId: SESSION,
         toolCall: { toolCallId: "t1", kind: "execute", title: "npm test" },
-        options: [
-          { optionId: "yes", kind: "allow_once", name: "Allow" },
-          { optionId: "no", kind: "reject_once", name: "Reject" }
-        ]
+        options:
+          scenario === "ask-always"
+            ? [{ optionId: "always", kind: "allow_always", name: "Always allow" }]
+            : [
+                { optionId: "yes", kind: "allow_once", name: "Allow" },
+                { optionId: "no", kind: "reject_once", name: "Reject" }
+              ]
       }
     });
   }
@@ -128,16 +139,23 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.id === undefined) return;
   // A message with an id and no method is the client's reply to a request of ours.
   if (!message.method) {
+    if (message.id !== PERMISSION_ID) return;
+    if ((scenario === "ask" && message.result?.outcome?.optionId === "yes") || (scenario === "ask-always" && message.result?.outcome?.optionId === "always")) {
+      tool("completed");
+      return answer(firstPromptId, "Tests passed: 40/40");
+    }
     // The call is left as it was, with no word on how it ended, and the turn just stops.
-    if (message.id === PERMISSION_ID) endTurn(firstPromptId);
+    endTurn(firstPromptId);
     return;
   }
   switch (message.method) {
     case "session/new":
       return opened(message.id);
     case "session/load":
+      if (process.env.FAKE_AGY_LOAD_FAILS === "1") return send({ id: message.id, error: { code: -32002, message: "session not found" } });
       return void loadSession(message.id);
     case "session/prompt":
+      lastPrompt = message.params?.prompt?.[0]?.text ?? "";
       return void playTurn(message.id);
     default:
       return send({ id: message.id, result: {} });

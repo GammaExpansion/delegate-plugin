@@ -3,7 +3,7 @@
 // On Windows, spawn() without a shell runs only real executables, and it does not try
 // PATHEXT: `codex` installed with npm is `codex.cmd`, a batch-file shim, so spawning
 // "codex" fails with ENOENT. Running the shim through cmd.exe would work, but then
-// stopping a job kills cmd.exe and leaves the real process running. So an npm shim is
+// stopping a turn kills cmd.exe and leaves the real process running. So an npm shim is
 // read for the script it starts, and that script is run with Node directly.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";

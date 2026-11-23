@@ -1,5 +1,6 @@
 // Backend registry. To add another agent CLI, implement the same four methods
-// (`check`, `listModels`, `settingsFor` and `run`) in a new file and register it here. A
+// (`check`, which may be async, `listModels`, `settingsFor` and `run`) in a new file and
+// register it here. A
 // backend also has a `name` (what --backend takes), a `label` (the product, as in
 // "Codex"), an `agentName` (how the agent is shown to the user while it works, as in
 // "Codex Agent"), and its own permission options: `permissions`, keyed by the names
@@ -20,6 +21,22 @@ import { codexBackend } from "./codex.mjs";
  * @property {AbortSignal} [signal]       Abort to interrupt the running turn.
  * @property {string | null} [traceFile]  Write every message to and from the backend here (see DELEGATE_TRACE).
  * @property {(event: BackendEvent) => void} onEvent
+ * @property {(request: ApprovalRequest) => Promise<string | { text: string } | null>} [onApproval]
+ *           Asked when the agent wants to do something its permission option does not
+ *           allow by itself. Resolves to the id of one of `request.choices` (null
+ *           declines), or to `{ text }`, the
+ *           user's own words: the request is declined and the words are passed on to the
+ *           agent, during the turn where it takes them (Codex) and after it otherwise.
+ *           Left out, every such request is declined.
+ *
+ * @typedef {object} ApprovalRequest
+ * @property {string} kind            "command" | "edit" | "execute" | "approval" | ...
+ * @property {string} title           The command, the files, or what the agent says it wants.
+ * @property {string | null} cwd      Where a command would run, when the agent says.
+ * @property {string | null} reason   Why, or which paths, when the agent says.
+ * @property {{ id: string, label: string, allow: boolean, stop?: boolean }[]} choices
+ *           The answers the user is offered, declining ones first, at most four. One that
+ *           stops also ends the turn.
  *
  * @typedef {{ type: "session", sessionId: string, model: string | null, effort?: string | null }   effort only where it is not already part of the model id
  *   | { type: "action", action: Action, output?: string }      a tool call finished; output is its clipped text

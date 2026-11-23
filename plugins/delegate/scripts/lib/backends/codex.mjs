@@ -1,9 +1,10 @@
 // Codex backend: drives `codex app-server` (stdio JSON-RPC).
 //
 // Permissions: a turn runs under one of Codex's own permission options (see PERMISSIONS),
-// which sets its sandbox and when it asks for approval. Nobody is there to approve
-// anything while a delegate runs, so every request that reaches this client is declined.
-// Codex records the step as declined and carries on, which is how it ends up in the result.
+// which sets its sandbox and when it asks for approval. A request that reaches this client
+// goes to `onApproval` with Codex's own answers to choose from (DECISIONS); without it, or
+// without a choice, it is declined. Codex records a declined step as declined and carries
+// on, which is how it ends up in the result.
 import { execCommandSync } from "../command.mjs";
 import { afterAbort, CANCEL_GRACE_MS } from "../abort.mjs";
 import { StdioRpcClient } from "../rpc.mjs";
@@ -56,7 +57,7 @@ function settingsFor({ permission, sandbox }) {
 
 // Codex normally says when a turn is over. If its final answer has arrived, none of its
 // own agents is still at work, and that word has not come after this long, the turn is
-// taken as finished. Without this a lost notification would leave the job running forever.
+// taken as finished. Without this a lost notification would leave the turn running forever.
 const INFERRED_FINISH_MS = 1500;
 
 // The sandbox as a full policy object. It is sent with every turn, so that a resumed
@@ -99,6 +100,119 @@ function toAction(item) {
   }
 }
 
+/**
+ * Codex's own answers to a request for approval, as the user is offered them, in the
+ * words of Codex's own approval prompt where it has them: the declining ones first.
+ * Codex keeps "acceptForSession" as long as its app-server, which here is the one task it
+ * was started for. Codex's persistent rules (an exec policy or network policy amendment)
+ * are not offered.
+ */
+const DECISIONS = [
+  { id: "decline", label: "No, continue without it", allow: false },
+  { id: "accept", label: "Yes, just this once", allow: true },
+  { id: "acceptForSession", label: "Yes, and don't ask again in this session", allow: true },
+  { id: "cancel", label: "No, and stop Codex", allow: false, stop: true }
+];
+const PLAIN_DECISIONS = DECISIONS.filter((choice) => choice.id === "decline" || choice.id === "accept");
+
+/**
+ * What a request for approval is about, for whoever is asked: a command and where it runs,
+ * the files an edit touches, or else the reason Codex gives; and the answers it takes.
+ * @returns {import("./index.mjs").ApprovalRequest}
+ */
+function approvalRequest(method, params, item) {
+  if (method === "item/commandExecution/requestApproval") {
+    const command = params?.command ?? item?.command ?? "a command";
+    const network = params?.networkApprovalContext;
+    if (network?.host) {
+      return {
+        kind: "network",
+        title: `${network.protocol ? `${network.protocol}://` : ""}${network.host} (for \`${command}\`)`,
+        cwd: params?.cwd ?? item?.cwd ?? null,
+        reason: params?.reason ?? null,
+        choices: DECISIONS
+      };
+    }
+    return {
+      // "writeStdin": input for a command that is already running, not a new command.
+      kind: params?.kind === "writeStdin" ? "input" : "command",
+      title: command,
+      cwd: params?.cwd ?? item?.cwd ?? null,
+      reason: params?.reason ?? null,
+      choices: DECISIONS
+    };
+  }
+  if (method === "item/permissions/requestApproval") {
+    return { kind: "permissions", title: describePermissions(params?.permissions), cwd: params?.cwd ?? null, reason: params?.reason ?? null, choices: PLAIN_DECISIONS };
+  }
+  if (method === "item/fileChange/requestApproval") {
+    const changes = (item?.changes ?? []).map(describeChange);
+    return {
+      kind: "edit",
+      title: changes.length ? changes.join(", ") : params?.reason ?? "edit files",
+      cwd: null,
+      reason: params?.reason ?? null,
+      choices: DECISIONS
+    };
+  }
+  return { kind: "approval", title: params?.reason ?? method, cwd: null, reason: null, choices: PLAIN_DECISIONS };
+}
+
+/** "write /a, /b; read /c; network": what a request for more permissions asks for. */
+function describePermissions(permissions) {
+  const fs = permissions?.fileSystem ?? {};
+  const parts = [];
+  const write = [...(fs.write ?? []), ...(fs.entries ?? []).filter((e) => e?.access === "write").map((e) => e?.path?.path ?? JSON.stringify(e?.path))];
+  const read = [...(fs.read ?? []), ...(fs.entries ?? []).filter((e) => e?.access === "read").map((e) => e?.path?.path ?? JSON.stringify(e?.path))];
+  if (write.length) parts.push(`write ${write.join(", ")}`);
+  if (read.length) parts.push(`read ${read.join(", ")}`);
+  if (permissions?.network?.enabled) parts.push("network access");
+  return parts.length ? parts.join("; ") : JSON.stringify(permissions ?? {});
+}
+
+/** What the user wrote in place of picking an answer, or null. */
+const wordsOf = (answer) =>
+  answer && typeof answer === "object" && typeof answer.text === "string" && answer.text.trim() ? answer.text.trim() : null;
+
+/** How the user's own words reach Codex, with what they are about. */
+const relayWords = (request, words) =>
+  `About your request to ${request.kind === "command" ? `run \`${request.title}\`` : `${request.kind}: ${request.title}`}: the user did not allow it, and wrote:\n\n${words}`;
+
+/** The answer picked, by its id; with none, the first that declines. */
+function pickChoice(choices, answer) {
+  if (typeof answer === "string") {
+    const picked = choices.find((choice) => choice.id === answer);
+    if (picked) return picked;
+  }
+  return choices.find((choice) => !choice.allow);
+}
+
+/**
+ * Whether Codex needs an OpenAI login for the model provider it is set up with, as its
+ * app-server tells it; null when that could not be learned. Nothing is read from the
+ * user's Codex config here: Codex reads it.
+ */
+async function needsOpenaiLogin() {
+  const client = new StdioRpcClient({ command: "codex", args: ["app-server"], cwd: process.cwd() }).start();
+  try {
+    const asked = (async () => {
+      await handshake(client);
+      try {
+        return await client.request("account/read", { refreshToken: false });
+      } catch {
+        return client.request("getAuthStatus", { includeToken: false, refreshToken: false });
+      }
+    })();
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 15_000).unref());
+    const status = await Promise.race([asked, timeout, client.failure]);
+    return typeof status?.requiresOpenaiAuth === "boolean" ? status.requiresOpenaiAuth : null;
+  } catch {
+    return null;
+  } finally {
+    await client.close();
+  }
+}
+
 export const codexBackend = {
   name: "codex",
   label: "Codex",
@@ -107,7 +221,7 @@ export const codexBackend = {
   defaultPermission: "read-only",
   settingsFor,
 
-  check() {
+  async check() {
     const info = { installed: false, version: null, auth: "unknown", hint: null };
     try {
       info.version = execCommandSync("codex", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
@@ -120,7 +234,14 @@ export const codexBackend = {
       // Exit code only: the output can include part of an API key, so it is not echoed.
       execCommandSync("codex", ["login", "status"], { stdio: "ignore" });
       info.auth = "ok";
+      return info;
     } catch {
+      // Not signed in to OpenAI. That is fine for a model provider of the user's own (an
+      // API gateway, a local model), and Codex says which it is.
+    }
+    if ((await needsOpenaiLogin()) === false) {
+      info.auth = "provider";
+    } else {
       info.auth = "missing";
       info.hint = "Run `codex login` in a terminal.";
     }
@@ -173,11 +294,13 @@ export const codexBackend = {
    * @param {import("./index.mjs").RunOptions} options
    * @returns {Promise<import("./index.mjs").RunResult>}
    */
-  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent }) {
+  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent, onApproval }) {
     const { settings: policy } = settingsFor({ permission, sandbox });
     const client = new StdioRpcClient({ command: "codex", args: ["app-server"], cwd, traceFile }).start();
     const actions = [];
     const messages = [];
+    // Items as they started, so that a request for approval can say what it is about.
+    const startedItems = new Map();
     const finishedTurns = new Map();
     let notifyTurnFinished = () => {};
     let usage = null;
@@ -244,6 +367,8 @@ export const codexBackend = {
     client.onNotification = (method, params) => {
       if (method === "thread/started") return nameSubagent(params?.thread?.id, params?.thread);
       if (method === "thread/name/updated") return nameSubagent(params?.threadId, { name: params?.threadName });
+      // Kept from every thread, so that a request from one of Codex's own agents can say what it is about.
+      if (method === "item/started" && params?.item?.id) startedItems.set(params.item.id, params.item);
       if (threadId && params?.threadId && params.threadId !== threadId) return onSubagentEvent(method, params);
       switch (method) {
         case "item/started": {
@@ -305,19 +430,45 @@ export const codexBackend = {
     };
 
     client.onRequest = async (method, params) => {
+      if (!method.endsWith("/requestApproval")) return refuseUnknownRequest(onEvent, method, params);
+      const request = approvalRequest(method, params, startedItems.get(params?.itemId));
+      const answer = onApproval && !signal?.aborted ? await onApproval(request) : null;
+      const words = wordsOf(answer);
+      // Words in place of an answer decline the step, and reach Codex as a message.
+      const choice = words ? request.choices.find((option) => option.id === "decline") ?? pickChoice(request.choices, null) : pickChoice(request.choices, answer);
+      if (words) setTimeout(() => steer(relayWords(request, words)), 0); // after the decision has gone out
       if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
-        // "decline" refuses this one step. Codex reports the step itself as declined
-        // (see item/completed above) and carries on with the turn.
-        return { decision: "decline" };
+        // Codex reports the step itself, as declined when it was (see item/completed
+        // above), and carries on with the turn, or stops it after "cancel".
+        return { decision: choice.id };
       }
-      if (method.endsWith("/requestApproval")) {
-        // A kind of approval that comes with no step of its own to report it.
-        const action = { kind: "approval", title: params?.reason ?? method, status: "declined" };
+      if (method === "item/permissions/requestApproval") {
+        // An answer grants what was asked for, for this turn, or nothing.
+        if (!choice.allow) {
+          const action = { kind: "permissions", title: request.title, status: "declined" };
+          actions.push(action);
+          onEvent({ type: "action", action });
+        }
+        return { permissions: choice.allow ? params?.permissions ?? {} : {}, scope: "turn" };
+      }
+      // A kind of approval that comes with no step of its own to report it.
+      if (!choice.allow) {
+        const action = { kind: "approval", title: request.title, status: "declined" };
         actions.push(action);
         onEvent({ type: "action", action });
-        return { decision: "decline" };
       }
-      return refuseUnknownRequest(onEvent, method, params);
+      return { decision: choice.id };
+    };
+
+    // The user's words go into the running turn (turn/steer). If the turn has ended by
+    // then, they open the next one, which this run waits for as well.
+    const followUps = [];
+    const steer = (text) => {
+      if (cancelled) return;
+      onEvent({ type: "note", text: "passing the user's words on to Codex" });
+      client
+        .request("turn/steer", { threadId, expectedTurnId: turnId, input: [{ type: "text", text, text_elements: [] }] })
+        .catch(() => followUps.push(text));
     };
 
     const interrupt = () => {
@@ -340,9 +491,19 @@ export const codexBackend = {
         approvalsReviewer: policy.approvalsReviewer,
         ...(model ? { model } : {})
       };
-      const opened = resumeSessionId
-        ? await client.request("thread/resume", { threadId: resumeSessionId, excludeTurns: true, ...threadParams })
-        : await client.request("thread/start", { ephemeral: false, ...threadParams });
+      const notes = [];
+      let opened = null;
+      if (resumeSessionId) {
+        try {
+          opened = await client.request("thread/resume", { threadId: resumeSessionId, excludeTurns: true, ...threadParams });
+        } catch (error) {
+          // A conversation whose session is gone (its rollout deleted, another CODEX_HOME)
+          // goes on in a new one rather than failing every turn from here on.
+          notes.push(`the earlier Codex session could not be resumed (${error?.message ?? error}), so this turn started a new one, which knows nothing of the earlier conversation`);
+          resumeSessionId = undefined;
+        }
+      }
+      opened ??= await client.request("thread/start", { ephemeral: false, ...threadParams });
       threadId = opened?.thread?.id ?? resumeSessionId;
       const usedModel = opened?.model ?? opened?.thread?.model ?? model ?? null;
       // The effort this turn runs at: the one asked for, or the one Codex opened the thread with.
@@ -380,18 +541,25 @@ export const codexBackend = {
         });
       };
 
-      const turn = await runTurn(prompt);
-
-      const finals = messages.filter((m) => m.phase === "final_answer");
-      const text = finals.length
-        ? finals.map((m) => m.text).join("\n\n")
-        : messages.length
-          ? messages[messages.length - 1].text
-          : "";
+      let turn = await runTurn(prompt);
+      // Words that came too late to steer the turn they were about.
+      for (let more = 0; more < 3 && followUps.length && !cancelled && turn.status === "completed"; more += 1) {
+        turn = await runTurn(followUps.splice(0).join("\n\n"));
+      }
 
       let status = "failed";
       if (cancelled || turn.status === "interrupted") status = "cancelled";
       else if (turn.status === "completed") status = "completed";
+
+      // The answer is Codex's final answer. Only a turn that ran its course without
+      // marking one takes its last message instead: a stopped turn's last message is
+      // something Codex said on the way, not an answer.
+      const finals = messages.filter((m) => m.phase === "final_answer");
+      const text = finals.length
+        ? finals.map((m) => m.text).join("\n\n")
+        : messages.length && status !== "cancelled"
+          ? messages[messages.length - 1].text
+          : "";
 
       return {
         status,
@@ -400,7 +568,8 @@ export const codexBackend = {
         text,
         actions,
         usage: toUsage(usage),
-        error: status === "failed" ? turn.error?.message ?? lastError ?? "Codex reported a failed turn." : null
+        error: status === "failed" ? turn.error?.message ?? lastError ?? "Codex reported a failed turn." : null,
+        notes
       };
     } finally {
       stopGrace();

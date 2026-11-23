@@ -1,5 +1,5 @@
 // A fallback for cancellation: both backends ask their agent to stop and then wait for
-// it to say that it has. An agent that never answers must not keep the job alive.
+// it to say that it has. An agent that never answers must not keep the turn alive.
 
 export const CANCEL_GRACE_MS = 10_000;
 

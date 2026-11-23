@@ -3,7 +3,7 @@ import { notImplemented } from "../rpc.mjs";
 import { oneLine } from "../text.mjs";
 
 /** How this plugin introduces itself to an agent. */
-export const CLIENT_INFO = { name: "delegate-plugin", title: "Delegate plugin for Claude Code", version: "0.3.4" };
+export const CLIENT_INFO = { name: "delegate-plugin", title: "Delegate plugin for Claude Code", version: "1.0.0" };
 
 /**
  * For a request from the agent that nobody here can answer (a question for the user in
@@ -26,11 +26,6 @@ export function effortLabel(effort) {
   return level === "xhigh" ? "xHigh" : level;
 }
 
-const capitalise = (word) => word.charAt(0).toUpperCase() + word.slice(1);
-
-/** "astra" -> "Astra", "codex-spark" -> "Codex Spark". */
-export const titleCase = (words) => words.split(/[-\s]+/).filter(Boolean).map(capitalise).join(" ");
-
 /** The sum of two token counts, either of which may be missing. */
 export function addUsage(a, b) {
   if (!a || !b) return a ?? b ?? null;
@@ -43,7 +38,7 @@ export function addUsage(a, b) {
 }
 
 /** "Approve for me", "approve_for_me" -> "approve-for-me". */
-export const optionName = (value) => String(value ?? "").trim().toLowerCase().replace(/[\s_]+/g, "-");
+const optionName = (value) => String(value ?? "").trim().toLowerCase().replace(/[\s_]+/g, "-");
 
 /**
  * The permission option a turn runs with: the one asked for, or the backend's default.

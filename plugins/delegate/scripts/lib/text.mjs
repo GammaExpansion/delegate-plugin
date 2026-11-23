@@ -1,4 +1,4 @@
-// Small text helpers shared by the backends and the job log.
+// Small text helpers shared by the backends.
 
 /** Collapse whitespace and cut to `max` characters. */
 export function oneLine(text, max = 200) {

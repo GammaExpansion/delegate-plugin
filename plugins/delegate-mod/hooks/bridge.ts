@@ -21,7 +21,19 @@ export type TurnRequest = {
 
 export type Action = { kind: string; title: string; status?: string; exitCode?: number | null; permission?: string }
 
-export type ApprovalRequest = { kind: string; title: string; cwd: string | null; reason: string | null }
+export type Choice = { id: string; label: string; allow: boolean }
+
+export type ApprovalRequest = {
+  kind: string
+  title: string
+  cwd: string | null
+  reason: string | null
+  /** The agent's own answers, declining ones first, at most four. */
+  choices: Choice[]
+}
+
+/** One of the agent's answers, or the user's own words, which decline and are passed on. */
+export type ApprovalAnswer = { choice: string } | { text: string } | null
 
 type BackendEvent =
   | { type: 'session'; sessionId: string; model: string | null; effort?: string | null }
@@ -43,8 +55,8 @@ export type TurnHooks = {
   onSession: (sessionId: string, model: string | null, effort: string | null) => Promise<void>
   /** What the delegate did last, in one line. */
   onActivity: (line: string) => void
-  /** Resolves true to allow the request. */
-  onApproval: (request: ApprovalRequest) => Promise<boolean>
+  /** Resolves to the answer for the agent. */
+  onApproval: (request: ApprovalRequest) => Promise<ApprovalAnswer>
 }
 
 export type TurnOutcome = { report: string | null; status: RunResult['status'] | null; error: string | null }
@@ -86,8 +98,8 @@ export async function runTurn($: EngineInterface, request: TurnRequest, hooks: T
   const saving: Promise<unknown>[] = []
 
   const answer = async (id: number, ask: ApprovalRequest) => {
-    const allow = await hooks.onApproval(ask).catch(() => false)
-    if (controlDir !== null) await $.fs.write(`${controlDir}/answer-${id}.json`, JSON.stringify({ allow }))
+    const picked = await hooks.onApproval(ask).catch(() => null)
+    if (controlDir !== null) await $.fs.write(`${controlDir}/answer-${id}.json`, JSON.stringify(picked ?? {}))
   }
 
   const handle = (line: string) => {

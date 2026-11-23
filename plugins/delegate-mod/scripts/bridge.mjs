@@ -16,8 +16,10 @@
 // Events, one JSON object per line:
 //   { type: "ready", controlDir }
 //   { type: "event", event }                 a BackendEvent (see lib/backends/index.mjs)
-//   { type: "approval", id, request }        an ApprovalRequest; answer with
-//                                            answer-<id>.json holding { "allow": true|false }
+//   { type: "approval", id, request }        an ApprovalRequest; answer with answer-<id>.json
+//                                            holding { "choice": "<id of one of request.choices>" },
+//                                            or { "text": "..." }: the user's own words, which
+//                                            decline the request and are passed on to the agent
 //   { type: "result", result, report }       the RunResult, and the report for Claude
 import fs from "node:fs";
 import os from "node:os";
@@ -73,7 +75,7 @@ async function cmdRun() {
   let nextId = 1;
 
   const settleAll = () => {
-    for (const resolve of pending.values()) resolve(false);
+    for (const resolve of pending.values()) resolve(null);
     pending.clear();
   };
   controller.signal.addEventListener("abort", settleAll, { once: true });
@@ -87,14 +89,17 @@ async function cmdRun() {
       } catch {
         continue;
       }
-      let allow = false;
+      let answer = null;
       try {
-        allow = JSON.parse(text).allow === true;
+        const parsed = JSON.parse(text);
+        if (typeof parsed.choice === "string") answer = parsed.choice;
+        else if (typeof parsed.text === "string" && parsed.text.trim()) answer = { text: parsed.text };
+        else if (typeof parsed.allow === "boolean") answer = parsed.allow;
       } catch {
         // Unreadable is no.
       }
       pending.delete(id);
-      resolve(allow);
+      resolve(answer);
     }
   }, POLL_MS);
 
@@ -116,7 +121,7 @@ async function cmdRun() {
     request.approvals === "ask"
       ? (ask) =>
           new Promise((resolve) => {
-            if (controller.signal.aborted) return resolve(false);
+            if (controller.signal.aborted) return resolve(null);
             const id = nextId++;
             pending.set(id, resolve);
             emit({ type: "approval", id, request: ask });

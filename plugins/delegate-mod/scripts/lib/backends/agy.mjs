@@ -2,8 +2,9 @@
 //
 // Permissions: a turn runs under one of agy's own permission options (see PERMISSIONS),
 // which is a session mode or the flag that switches its checks off. What agy asks about
-// goes to `onApproval`, which asks the user; without one, it is declined and listed in
-// the result. Reading inside the workspace is allowed without asking anyone.
+// goes to `onApproval` with agy's own options to choose from; without it, or without a
+// choice, it is declined and listed in the result. Reading inside the workspace is
+// allowed without asking anyone.
 import { execCommandSync } from "../command.mjs";
 import fs from "node:fs";
 import path from "node:path";
@@ -49,6 +50,11 @@ function settingsFor({ permission, sandbox }) {
 // agy tends to end its turn at a declined request without saying anything. It is then
 // told, at most this many times, that nobody can approve and asked to finish without.
 const MAX_NUDGES = 2;
+
+/** The user's own words about requests they did not allow, as agy is told them next. */
+function relayWords(entries) {
+  return entries.map(({ what, words }) => `About your request (${what}): the user did not allow it, and wrote:\n\n${words}`).join("\n\n");
+}
 
 /** What agy is told after requests of its were declined and it stopped without a word. */
 function nudgeAfterDeclines(declined) {
@@ -160,6 +166,19 @@ function fetchModels() {
   return models;
 }
 
+// agy's options for one request, as the user is offered them: refusals first, at most four.
+const KIND_ORDER = ["reject_once", "reject_always", "allow_once", "allow_always"];
+const kindRank = (kind) => (KIND_ORDER.includes(kind) ? KIND_ORDER.indexOf(kind) : String(kind).startsWith("reject") ? 1.5 : 3.5);
+
+/** @returns {{ id: string, label: string, allow: boolean }[]} */
+function choicesOf(options) {
+  return [...options]
+    .filter((option) => option?.optionId)
+    .sort((a, b) => kindRank(a.kind) - kindRank(b.kind))
+    .slice(0, 4)
+    .map((option) => ({ id: option.optionId, label: option.name || option.kind, allow: String(option.kind).startsWith("allow") }));
+}
+
 /**
  * The option that answers one request. An approval is only ever for this one request,
  * never a lasting one. A refusal may be any kind of "reject".
@@ -237,6 +256,9 @@ export const agyBackend = {
     // Requests declined since agy last said anything. If its turn ends with some still
     // here, it stopped at the refusal without a word (see MAX_NUDGES).
     const unanswered = [];
+    // What the user wrote in place of answering a request. agy takes no message during a
+    // turn, so it is told after the turn, whatever it said meanwhile.
+    const userWords = [];
     // agy speaks in several stretches, with thinking and tool calls in between. They are
     // kept apart in the final message, or one stretch would run straight into the next.
     let messageBroken = false;
@@ -354,11 +376,19 @@ export const agyBackend = {
 
       let allow = Boolean(policy.allowAll || harmless);
       let asked = false;
-      if (!allow && onApproval && !signal?.aborted && pickOption(params?.options ?? [], true)) {
+      let option = null;
+      const choices = choicesOf(params?.options ?? []);
+      if (!allow && onApproval && !signal?.aborted && choices.some((choice) => choice.allow)) {
         asked = true;
-        allow = (await onApproval({ kind: entry.kind ?? "tool", title: entry.title, cwd: null, reason: paths.length ? paths.join(", ") : null })) === true;
+        const answer = await onApproval({ kind: entry.kind ?? "tool", title: entry.title, cwd: null, reason: paths.length ? paths.join(", ") : null, choices });
+        const words = answer && typeof answer === "object" && typeof answer.text === "string" ? answer.text.trim() : "";
+        if (words) userWords.push({ what: `${entry.kind ?? "tool"} ${oneLine(entry.title, 160)}`, words });
+        const picked =
+          typeof answer === "string" ? choices.find((choice) => choice.id === answer) : answer === true ? choices.find((choice) => choice.allow) : null;
+        allow = Boolean(picked?.allow);
+        option = picked ? (params?.options ?? []).find((candidate) => candidate.optionId === picked.id) ?? null : null;
       }
-      const option = pickOption(params?.options ?? [], allow);
+      option ??= pickOption(params?.options ?? [], allow);
       const allowed = allow && Boolean(option);
       tools.set(call.toolCallId, { ...(tools.get(call.toolCallId) ?? entry), permission: allowed ? "allowed" : "denied" });
       if (!allowed) {
@@ -507,10 +537,20 @@ export const agyBackend = {
       let result = await send(prompt);
       // Whatever came in around a prompt that was dropped is history, not an answer.
       const promptDropped = dropped(result);
-      for (let nudges = 0; nudges < MAX_NUDGES && unanswered.length && !cancelled && !background && result?.stopReason === "end_turn"; nudges += 1) {
-        onEvent({ type: "note", text: "agy stopped at a declined request without answering; asking it to finish without" });
+      for (
+        let nudges = 0;
+        nudges < MAX_NUDGES + 1 && (userWords.length || unanswered.length) && !cancelled && !background && result?.stopReason === "end_turn";
+        nudges += 1
+      ) {
         messageBroken = true;
-        result = await send(nudgeAfterDeclines(unanswered.splice(0)));
+        if (userWords.length) {
+          onEvent({ type: "note", text: "passing the user's words on to agy" });
+          unanswered.length = 0;
+          result = await send(relayWords(userWords.splice(0)));
+        } else {
+          onEvent({ type: "note", text: "agy stopped at a declined request without answering; asking it to finish without" });
+          result = await send(nudgeAfterDeclines(unanswered.splice(0)));
+        }
       }
 
       const stop = result?.stopReason;

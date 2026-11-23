@@ -14,7 +14,8 @@
 //   declined     agy asks to run a command, never reports the call as ended, and ends
 //                its turn without a word; told that nobody can approve, it answers
 //   ask          agy asks to run a command; allowed, it runs it and answers, and refused,
-//                it behaves as in "declined"
+//                it behaves as in "declined"; sent the user's words after the turn, it
+//                answers with them
 //
 // A resumed session (`session/load`) replays its history as updates. A real agy answers
 // the load while a long history is still on its way, which these two play out:
@@ -48,6 +49,7 @@ const answer = (id, text) => {
 
 let prompts = 0;
 let firstPromptId = null;
+let lastPrompt = "";
 
 /** One step of an earlier turn, the way agy replays it: a call that is already over, and text. */
 const replayStep = (n) => {
@@ -82,6 +84,7 @@ async function playTurn(id) {
   }
   if (scenario === "declined" || scenario === "ask") {
     if (prompts > 1) {
+      if (scenario === "ask" && lastPrompt.includes("the user did not allow it")) return answer(id, `Heard: ${lastPrompt.split("\n").pop()}`);
       return answer(id, "I could not run the tests.");
     }
     firstPromptId = id;
@@ -145,6 +148,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     case "session/load":
       return void loadSession(message.id);
     case "session/prompt":
+      lastPrompt = message.params?.prompt?.[0]?.text ?? "";
       return void playTurn(message.id);
     default:
       return send({ id: message.id, result: {} });

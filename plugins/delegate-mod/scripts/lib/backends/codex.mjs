@@ -2,8 +2,9 @@
 //
 // Permissions: a turn runs under one of Codex's own permission options (see PERMISSIONS),
 // which sets its sandbox and when it asks for approval. A request that reaches this client
-// goes to `onApproval`, which asks the user; without one, it is declined. Codex records a
-// declined step as declined and carries on, which is how it ends up in the result.
+// goes to `onApproval` with Codex's own answers to choose from (DECISIONS); without it, or
+// without a choice, it is declined. Codex records a declined step as declined and carries
+// on, which is how it ends up in the result.
 import { execCommandSync } from "../command.mjs";
 import { afterAbort, CANCEL_GRACE_MS } from "../abort.mjs";
 import { StdioRpcClient } from "../rpc.mjs";
@@ -100,8 +101,22 @@ function toAction(item) {
 }
 
 /**
+ * Codex's own answers to a request for approval of a command or a file change, as the
+ * user is offered them: the declining ones first. "acceptForSession" lasts as long as the
+ * app-server, which is this one turn. Codex's persistent rules (an exec policy or network
+ * policy amendment) are not offered: a question takes four answers at most.
+ */
+const DECISIONS = [
+  { id: "decline", label: "Decline", allow: false },
+  { id: "accept", label: "Accept", allow: true },
+  { id: "acceptForSession", label: "Accept for this turn", allow: true },
+  { id: "cancel", label: "Decline and stop", allow: false }
+];
+const PLAIN_DECISIONS = DECISIONS.filter((choice) => choice.id === "decline" || choice.id === "accept");
+
+/**
  * What a request for approval is about, for whoever is asked: a command and where it runs,
- * the files an edit touches, or else the reason Codex gives.
+ * the files an edit touches, or else the reason Codex gives; and the answers it takes.
  * @returns {import("./index.mjs").ApprovalRequest}
  */
 function approvalRequest(method, params, item) {
@@ -110,14 +125,39 @@ function approvalRequest(method, params, item) {
       kind: "command",
       title: params?.command ?? item?.command ?? "a command",
       cwd: params?.cwd ?? item?.cwd ?? null,
-      reason: params?.reason ?? null
+      reason: params?.reason ?? null,
+      choices: DECISIONS
     };
   }
   if (method === "item/fileChange/requestApproval") {
     const changes = (item?.changes ?? []).map(describeChange);
-    return { kind: "edit", title: changes.length ? changes.join(", ") : params?.reason ?? "edit files", cwd: null, reason: params?.reason ?? null };
+    return {
+      kind: "edit",
+      title: changes.length ? changes.join(", ") : params?.reason ?? "edit files",
+      cwd: null,
+      reason: params?.reason ?? null,
+      choices: DECISIONS
+    };
   }
-  return { kind: "approval", title: params?.reason ?? method, cwd: null, reason: null };
+  return { kind: "approval", title: params?.reason ?? method, cwd: null, reason: null, choices: PLAIN_DECISIONS };
+}
+
+/** What the user wrote in place of picking an answer, or null. */
+const wordsOf = (answer) =>
+  answer && typeof answer === "object" && typeof answer.text === "string" && answer.text.trim() ? answer.text.trim() : null;
+
+/** How the user's own words reach Codex, with what they are about. */
+const relayWords = (request, words) =>
+  `About your request to ${request.kind === "command" ? `run \`${request.title}\`` : `do this: ${request.title}`}: the user did not allow it, and wrote:\n\n${words}`;
+
+/** The answer picked, by its id; a caller that answers true or false picks the first of that kind. */
+function pickChoice(choices, answer) {
+  if (answer === true) return choices.find((choice) => choice.allow);
+  if (typeof answer === "string") {
+    const picked = choices.find((choice) => choice.id === answer);
+    if (picked) return picked;
+  }
+  return choices.find((choice) => !choice.allow);
 }
 
 /**
@@ -361,19 +401,34 @@ export const codexBackend = {
     client.onRequest = async (method, params) => {
       if (!method.endsWith("/requestApproval")) return refuseUnknownRequest(onEvent, method, params);
       const request = approvalRequest(method, params, startedItems.get(params?.itemId));
-      const allowed = onApproval && !signal?.aborted ? (await onApproval(request)) === true : false;
+      const answer = onApproval && !signal?.aborted ? await onApproval(request) : null;
+      const words = wordsOf(answer);
+      // Words in place of an answer decline the step, and reach Codex as a message.
+      const choice = words ? request.choices.find((option) => option.id === "decline") ?? pickChoice(request.choices, null) : pickChoice(request.choices, answer);
+      if (words) setTimeout(() => steer(relayWords(request, words)), 0); // after the decision has gone out
       if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
-        // An answer for this one step. Codex reports the step itself, as declined when
-        // it was (see item/completed above), and carries on with the turn.
-        return { decision: allowed ? "accept" : "decline" };
+        // Codex reports the step itself, as declined when it was (see item/completed
+        // above), and carries on with the turn, or stops it after "cancel".
+        return { decision: choice.id };
       }
       // A kind of approval that comes with no step of its own to report it.
-      if (!allowed) {
+      if (!choice.allow) {
         const action = { kind: "approval", title: request.title, status: "declined" };
         actions.push(action);
         onEvent({ type: "action", action });
       }
-      return { decision: allowed ? "accept" : "decline" };
+      return { decision: choice.id };
+    };
+
+    // The user's words go into the running turn (turn/steer). If the turn has ended by
+    // then, they open the next one, which this run waits for as well.
+    const followUps = [];
+    const steer = (text) => {
+      if (cancelled) return;
+      onEvent({ type: "note", text: "passing the user's words on to Codex" });
+      client
+        .request("turn/steer", { threadId, expectedTurnId: turnId, input: [{ type: "text", text, text_elements: [] }] })
+        .catch(() => followUps.push(text));
     };
 
     const interrupt = () => {
@@ -436,7 +491,11 @@ export const codexBackend = {
         });
       };
 
-      const turn = await runTurn(prompt);
+      let turn = await runTurn(prompt);
+      // Words that came too late to steer the turn they were about.
+      for (let more = 0; more < 3 && followUps.length && !cancelled && turn.status === "completed"; more += 1) {
+        turn = await runTurn(followUps.splice(0).join("\n\n"));
+      }
 
       const finals = messages.filter((m) => m.phase === "final_answer");
       const text = finals.length

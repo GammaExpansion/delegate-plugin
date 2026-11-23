@@ -21,16 +21,21 @@ import { codexBackend } from "./codex.mjs";
  * @property {AbortSignal} [signal]       Abort to interrupt the running turn.
  * @property {string | null} [traceFile]  Write every message to and from the backend here (see DELEGATE_TRACE).
  * @property {(event: BackendEvent) => void} onEvent
- * @property {(request: ApprovalRequest) => Promise<boolean>} [onApproval]
+ * @property {(request: ApprovalRequest) => Promise<string | { text: string } | boolean | null>} [onApproval]
  *           Asked when the agent wants to do something its permission option does not
- *           allow by itself. Resolves true to allow this one request. Left out, every
- *           such request is declined.
+ *           allow by itself. Resolves to the id of one of `request.choices` (true or false
+ *           picks the first that allows or declines; null declines), or to `{ text }`, the
+ *           user's own words: the request is declined and the words are passed on to the
+ *           agent, during the turn where it takes them (Codex) and after it otherwise.
+ *           Left out, every such request is declined.
  *
  * @typedef {object} ApprovalRequest
  * @property {string} kind            "command" | "edit" | "execute" | "approval" | ...
  * @property {string} title           The command, the files, or what the agent says it wants.
  * @property {string | null} cwd      Where a command would run, when the agent says.
  * @property {string | null} reason   Why, or which paths, when the agent says.
+ * @property {{ id: string, label: string, allow: boolean }[]} choices
+ *           The agent's own answers to it, declining ones first, at most four.
  *
  * @typedef {{ type: "session", sessionId: string, model: string | null, effort?: string | null }   effort only where it is not already part of the model id
  *   | { type: "action", action: Action, output?: string }      a tool call finished; output is its clipped text

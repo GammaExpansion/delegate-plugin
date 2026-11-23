@@ -14,7 +14,7 @@ import type { EngineInterface, Register, TurnStepInput } from 'claude-code'
 import type { Progress } from '../types'
 import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './agents'
 import { endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
-import { oneLine, runTurn, type ApprovalRequest } from './bridge'
+import { oneLine, runTurn, type ApprovalAnswer, type ApprovalRequest } from './bridge'
 import { takeOptions } from './options'
 import { grantFor, type Backend, type Settings } from './permissions'
 
@@ -72,15 +72,12 @@ async function saveConversation($: EngineInterface, agentId: string, conversatio
   for (const { key } of dated.slice(0, dated.length - CONVERSATIONS_KEPT)) await $.store.delete(key)
 }
 
-const ALLOW = 'Allow'
-const DENY = 'Deny'
-
 /**
- * Puts a delegate's request to the user, in the engine's own question dialog, and resolves
- * true only when they pick Allow. The dialog also takes free text. An answer that is
- * neither option is put back to the user once, with their words quoted; if the second
- * answer is not an option either, the request is declined. Every answer that declined the
- * request without a plain Deny is noted, for the report.
+ * Puts a delegate's request to the user in the engine's own question dialog, with the
+ * agent's own answers to pick from (declining ones first, so that an answer the user did
+ * not pick themselves never allows). The dialog also takes free text, which no agent takes
+ * as an answer: it declines the request, and the words are passed on to the agent. Words,
+ * and a dialog closed without an answer, are noted for the report.
  */
 async function askUser(
   $: EngineInterface,
@@ -88,7 +85,7 @@ async function askUser(
   request: ApprovalRequest,
   show: (line: string) => void,
   note: (line: string) => void,
-): Promise<boolean> {
+): Promise<ApprovalAnswer> {
   const what =
     request.kind === 'command'
       ? `run \`${oneLine(request.title, 300)}\`${request.cwd ? ` in ${request.cwd}` : ''}`
@@ -97,28 +94,22 @@ async function askUser(
         : `do this (${request.kind}): ${oneLine(request.title, 300)}`
   const why = request.reason ? ` (${oneLine(request.reason, 200)})` : ''
   const short = oneLine(what, 100)
-  const ask = (question: string) =>
-    $.ui.ask(question, {
-      header: PRODUCT[backend],
-      // Deny first, so that an answer the user did not pick themselves never allows.
-      options: [DENY, ALLOW],
-    })
+  const choices = request.choices.slice(0, 4)
+  if (choices.length < 2) return null
   show(`waiting for you: ${short}`)
   try {
-    let answer = await ask(`${AGENT_NAME[backend]} wants to ${what}${why}. Allow it?`)
-    if (answer !== ALLOW && answer !== DENY) {
-      const said = oneLine(answer, 120)
-      answer = await ask(`You answered "${said}", which is neither Allow nor Deny. ${AGENT_NAME[backend]} still wants to ${what}. Allow it?`)
-      if (answer !== ALLOW && answer !== DENY) {
-        note(`asked whether ${AGENT_NAME[backend]} may ${short}, the user answered "${said}" and then "${oneLine(answer, 120)}", neither Allow nor Deny, so it was declined.`)
-        return false
-      }
-    }
-    return answer === ALLOW
+    const answer = await $.ui.ask(`${AGENT_NAME[backend]} wants to ${what}${why}. What should it do?`, {
+      header: PRODUCT[backend],
+      options: choices.map(choice => choice.label),
+    })
+    const picked = choices.find(choice => choice.label === answer)
+    if (picked !== undefined) return { choice: picked.id }
+    note(`the user did not allow ${AGENT_NAME[backend]} to ${short}, and wrote: "${oneLine(answer, 300)}". The words were passed on to ${PRODUCT[backend]}.`)
+    return { text: answer }
   } catch {
     // Dismissed, or nobody to ask (claude -p).
     note(`asked whether ${AGENT_NAME[backend]} may ${short}, the question was closed without an answer, so it was declined.`)
-    return false
+    return null
   }
 }
 
@@ -178,7 +169,7 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
       onApproval: request =>
         grant.approvals === 'ask'
           ? askUser($, backend, request, line => show('running', line), line => notes.push(line))
-          : Promise.resolve(false),
+          : Promise.resolve(null),
     },
   )
 

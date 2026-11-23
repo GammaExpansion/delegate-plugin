@@ -7,7 +7,8 @@
 //   busy-subagent   the same, but the subagent is still at work when the final answer
 //                   arrives and finishes a second later
 //   normal          the turn is reported as finished right after the final answer
-//   approval        Codex asks to run a command, and says in its answer what it was told
+//   approval        Codex asks to run a command, and says in its answer what it was told,
+//                   and any message it was sent with turn/steer while it waited after a no
 //
 // It also records the settings each thread was opened with, in FAKE_CODEX_RECORD if set.
 import fs from "node:fs";
@@ -29,10 +30,15 @@ function askApproval() {
   send({ id: APPROVAL_ID, method: "item/commandExecution/requestApproval", params: { threadId: MAIN, turnId: TURN, itemId: "x1", command: "touch b.txt" } });
 }
 
-function afterApproval(decision) {
+const steered = [];
+
+async function afterApproval(decision) {
+  // After a no, a message may follow with turn/steer: give it time to arrive.
+  if (decision !== "accept") await later(200);
   const status = decision === "accept" ? "completed" : "declined";
   notify("item/completed", { threadId: MAIN, turnId: TURN, item: { id: "x1", type: "commandExecution", command: "touch b.txt", status, exitCode: decision === "accept" ? 0 : null } });
-  notify("item/completed", { threadId: MAIN, turnId: TURN, item: { id: "m2", type: "agentMessage", phase: "final_answer", text: `the answer was ${decision}` } });
+  const heard = steered.length ? ` · steered: ${steered.join(" | ")}` : "";
+  notify("item/completed", { threadId: MAIN, turnId: TURN, item: { id: "m2", type: "agentMessage", phase: "final_answer", text: `the answer was ${decision}${heard}` } });
   notify("turn/completed", { threadId: MAIN, turn: { id: TURN, status: "completed" } });
 }
 
@@ -61,7 +67,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.id === undefined) return;
   // A message with an id and no method is the client's reply to a request of ours.
   if (!message.method) {
-    if (message.id === APPROVAL_ID) afterApproval(message.result?.decision);
+    if (message.id === APPROVAL_ID) void afterApproval(message.result?.decision);
     return;
   }
   switch (message.method) {
@@ -69,6 +75,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     case "thread/resume":
       record({ method: message.method, sandbox: message.params.sandbox, approvalsReviewer: message.params.approvalsReviewer });
       return send({ id: message.id, result: { thread: { id: MAIN }, model: "fake-model", reasoningEffort: "xhigh" } });
+    case "turn/steer":
+      steered.push(message.params.input?.[0]?.text ?? "");
+      return send({ id: message.id, result: { turnId: TURN } });
     case "turn/start":
       send({ id: message.id, result: { turn: { id: TURN } } });
       return void playTurn();

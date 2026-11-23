@@ -46,7 +46,8 @@ function runTurn(request, { env = {}, onEvent = () => {} } = {}) {
   });
 }
 
-const answer = (controlDir, id, allow) => fs.writeFileSync(path.join(controlDir, `answer-${id}.json`), JSON.stringify({ allow }));
+/** Answers a request with one of the agent's own answers (`{ choice }`) or with words (`{ text }`). */
+const answer = (controlDir, id, reply) => fs.writeFileSync(path.join(controlDir, `answer-${id}.json`), JSON.stringify(reply));
 
 test("a turn ends with a result and a report, and the control directory is gone", async () => {
   const { code, result, controlDir, events } = await runTurn({ backend: "codex", permission: "read-only" }, { env: { FAKE_CODEX_SCENARIO: "normal" } });
@@ -58,7 +59,7 @@ test("a turn ends with a result and a report, and the control directory is gone"
   assert.equal(fs.existsSync(controlDir), false);
 });
 
-test("a request for approval is put to the caller, and a yes lets the step run", async () => {
+test("a request for approval is put to the caller with Codex's own answers, and Accept lets the step run", async () => {
   const asked = [];
   const { result } = await runTurn(
     { backend: "codex", permission: "read-only", approvals: "ask" },
@@ -67,13 +68,32 @@ test("a request for approval is put to the caller, and a yes lets the step run",
       onEvent: (event, { controlDir }) => {
         if (event.type !== "approval") return;
         asked.push(event.request);
-        answer(controlDir, event.id, true);
+        answer(controlDir, event.id, { choice: "accept" });
       }
     }
   );
-  assert.deepEqual(asked, [{ kind: "command", title: "touch b.txt", cwd: null, reason: null }]);
+  assert.equal(asked.length, 1);
+  assert.deepEqual({ ...asked[0], choices: undefined }, { kind: "command", title: "touch b.txt", cwd: null, reason: null, choices: undefined });
+  assert.deepEqual(
+    asked[0].choices.map(({ id, label }) => `${id}=${label}`),
+    ["decline=Decline", "accept=Accept", "acceptForSession=Accept for this turn", "cancel=Decline and stop"]
+  );
   assert.equal(result.result.text, "the answer was accept");
   assert.doesNotMatch(result.report, /declined/);
+});
+
+test("words in place of an answer decline the step and reach Codex during the turn", async () => {
+  const { result } = await runTurn(
+    { backend: "codex", permission: "read-only", approvals: "ask" },
+    {
+      env: { FAKE_CODEX_SCENARIO: "approval" },
+      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { text: "write it under /tmp instead" })
+    }
+  );
+  assert.equal(
+    result.result.text,
+    "the answer was decline · steered: About your request to run `touch b.txt`: the user did not allow it, and wrote:\n\nwrite it under /tmp instead"
+  );
 });
 
 test("a no declines the step, and the report says the user was asked", async () => {
@@ -81,7 +101,7 @@ test("a no declines the step, and the report says the user was asked", async () 
     { backend: "codex", permission: "read-only", approvals: "ask" },
     {
       env: { FAKE_CODEX_SCENARIO: "approval" },
-      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, false)
+      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { choice: "decline" })
     }
   );
   assert.equal(result.result.text, "the answer was decline");
@@ -131,11 +151,13 @@ test("agy: an allowed request runs, and the answer comes after it", async () => 
       onEvent: (event, { controlDir }) => {
         if (event.type !== "approval") return;
         asked.push(event.request);
-        answer(controlDir, event.id, true);
+        answer(controlDir, event.id, { choice: "yes" });
       }
     }
   );
   assert.deepEqual(asked.map(({ kind, title }) => ({ kind, title })), [{ kind: "execute", title: "npm test" }]);
+  // agy's own options, its refusal first.
+  assert.deepEqual(asked[0].choices.map(({ id, label }) => `${id}=${label}`), ["no=Reject", "yes=Allow"]);
   assert.equal(result.result.status, "completed");
   assert.equal(result.result.text, "Tests passed: 40/40");
   assert.match(result.report, /^\[delegate\] Gemini Agent \(fake-gemini\) · completed/);
@@ -146,11 +168,22 @@ test("agy: a refused request is declined, and agy is asked to finish without it"
     { backend: "agy", permission: "default", approvals: "ask" },
     {
       env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
-      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, false)
+      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { choice: "no" })
     }
   );
   assert.equal(result.result.text, "I could not run the tests.");
   assert.match(result.report, /declined \(1\):\n- \[execute\] npm test \(pending, permission denied\)/);
+});
+
+test("agy: words in place of an answer decline the request and reach agy after the turn", async () => {
+  const { result } = await runTurn(
+    { backend: "agy", permission: "default", approvals: "ask" },
+    {
+      env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
+      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { text: "skip the tests, just read the code" })
+    }
+  );
+  assert.equal(result.result.text, "Heard: skip the tests, just read the code");
 });
 
 test("a turn without the sandbox opens Codex with none, and the headline says so", async () => {

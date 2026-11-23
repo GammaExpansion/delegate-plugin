@@ -29,9 +29,10 @@ const notOurs = new Set<string>()
 /** Hand-back calls made, by turn, to check on the step after. */
 const handedBack = new Map<string, { id: string; report: string }>()
 /**
- * Whether a delegate's latest run was offered the hand-back tool, by agent. Claude Code
- * offers it where auto mode's checks need it; elsewhere a subagent's last words are its
- * report. Where nobody is asked, it stays offered, which is what a missing entry means.
+ * Whether a delegate's run was offered the hand-back tool, by agent, where Claude Code asked
+ * about it. Outside auto mode the tool is not on a subagent's list at all, and nothing is
+ * asked: its last words are its report. In auto mode the tool is offered, and may not be
+ * asked about either. So a run nobody asked about hands back in auto mode only.
  */
 const handBackOffered = new Map<string, boolean>()
 
@@ -245,7 +246,10 @@ async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: stri
   }
   const report = await runDelegate($, agentId, backend, signal)
   if (report === null) return yield* endTurn(e)
-  if (handBackOffered.get(agentId) === false) return yield* say(e, report)
+  const asked = handBackOffered.get(agentId)
+  handBackOffered.delete(agentId)
+  const offered = asked ?? spawns.get(agentId)?.mode === 'auto'
+  if (!offered) return yield* say(e, report)
   return yield* handBack(e, report, id => handedBack.set(e.turnId, { id, report }))
 }
 
@@ -309,7 +313,7 @@ export const register: Register = on => {
     return spawned
   })
 
-  // Learn, without changing it, whether each run of a delegate is offered the hand-back tool.
+  // Learn, without changing it, whether a delegate's run is offered the hand-back tool, where asked.
   on('tool.offer', { tool: 'SubagentHandback' }, async ($, e, next) => {
     const offered = await next(e)
     if (e.agentId !== undefined && backendOfType(e.subagentType) !== undefined) handBackOffered.set(e.agentId, offered.isOffered)

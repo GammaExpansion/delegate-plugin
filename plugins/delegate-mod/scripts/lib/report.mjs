@@ -42,12 +42,13 @@ function declinedNote(approvals, mode) {
 /**
  * One finished turn as its subagent hands it back: a headline, how the turn ended, what
  * was declined, and then the delegate's answer, unchanged.
- * @param {{ backend: object, permission: string, approvals: string, mode?: string | null,
+ * @param {{ backend: object, permission: string, sandbox?: string | null, approvals: string, mode?: string | null,
  *   model: string | null, effort: string | null, durationMs: number,
  *   result: import("./backends/index.mjs").RunResult }} turn
  */
-export function renderReport({ backend, permission, approvals, mode, model, effort, durationMs, result }) {
-  const lines = [[`[delegate] ${agentLabel(backend, model, effort)}`, result.status, formatDuration(durationMs), permission].join(" · ")];
+export function renderReport({ backend, permission, sandbox, approvals, mode, model, effort, durationMs, result }) {
+  const option = sandbox === "disabled" ? `${permission}, no sandbox` : permission;
+  const lines = [[`[delegate] ${agentLabel(backend, model, effort)}`, result.status, formatDuration(durationMs), option].join(" · ")];
   if (result.error) lines.push(`error: ${result.error}`);
   if (result.status === "cancelled" && !result.error) lines.push("note: the run was stopped before it finished.");
   for (const note of result.notes ?? []) lines.push(`note: ${note}`);

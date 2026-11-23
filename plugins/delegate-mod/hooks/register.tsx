@@ -13,10 +13,10 @@
 import type { EngineInterface, Register, TurnStepInput } from 'claude-code'
 import type { Progress } from '../types'
 import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './agents'
-import { HANDBACK, endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
+import { endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
 import { oneLine, runTurn, type ApprovalRequest } from './bridge'
 import { takeOptions } from './options'
-import { grantFor, type Backend } from './permissions'
+import { grantFor, type Backend, type Settings } from './permissions'
 
 /** What the latest spawn of a delegate said: the backend, the mode, and the row it came from. */
 type Spawn = { backend: Backend; mode: string | undefined; rowId: string }
@@ -96,9 +96,9 @@ async function askUser($: EngineInterface, backend: Backend, request: ApprovalRe
 }
 
 /** Runs one turn of a delegate on its backend and returns the report, or null if it was stopped. */
-async function runDelegate($: EngineInterface, agentId: string, backend: Backend, signal: AbortSignal): Promise<string | null> {
+async function runDelegate($: EngineInterface, agentId: string, backend: Backend, signal: AbortSignal, settings: Settings): Promise<string | null> {
   const spawn = spawns.get(agentId)
-  const grant = grantFor(backend, spawn?.mode)
+  const grant = grantFor(backend, spawn?.mode, settings)
   const leading = takeOptions(await latestMessage($, agentId))
   if (leading.task === '') return `[delegate] ${AGENT_NAME[backend]} · failed\nerror: the prompt holds no task.`
 
@@ -124,6 +124,7 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
       cwd,
       prompt: leading.task,
       permission: grant.permission,
+      sandbox: grant.sandbox,
       approvals: grant.approvals,
       mode: grant.mode,
       model,
@@ -159,13 +160,13 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
   return report
 }
 
-async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: string, backend: Backend, signal: AbortSignal) {
+async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: string, backend: Backend, signal: AbortSignal, settings: Settings) {
   const sent = handedBack.get(e.turnId)
   if (sent !== undefined) {
     handedBack.delete(e.turnId)
     return yield* (await handBackFailed($, agentId, sent.id)) ? say(e, sent.report) : endTurn(e)
   }
-  const report = await runDelegate($, agentId, backend, signal)
+  const report = await runDelegate($, agentId, backend, signal, settings)
   if (report === null) return yield* endTurn(e)
   return yield* handBack(e, report, id => handedBack.set(e.turnId, { id, report }))
 }
@@ -188,14 +189,18 @@ const backendArg = (text: unknown): string[] => {
   return word === 'codex' || word === 'agy' ? [word] : []
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const settings: Settings = { codexSandbox: options.codexSandbox === 'off' ? 'off' : 'on' }
+
   on('session.start', async ($, e, next) => {
-    // The model of these agents is never called, so they need no tools: the one listed is
-    // the hand-back tool, which the plugin calls for them. An empty list would mean every
-    // tool, and the placeholder model would get them all if this plugin ever failed to
-    // answer a step.
+    // The model of these agents is never called, so they need no tools of their own; the
+    // hand-back tool, which the plugin calls for them, is added by Claude Code itself and
+    // cannot be listed. An empty list would mean every tool, which the placeholder model
+    // would get if this plugin ever failed to answer a step, and an agent whose list comes
+    // to nothing is not started at all. So the list holds one tool that can do no harm:
+    // Glob, which lists file names.
     for (const backend of BACKENDS) {
-      await $.agent.register({ ...AGENT_SPECS[backend], model: 'haiku', omitClaudeMd: true, tools: [HANDBACK] })
+      await $.agent.register({ ...AGENT_SPECS[backend], model: 'haiku', omitClaudeMd: true, tools: ['Glob'] })
     }
     await $.tool.register({
       name: 'models',
@@ -226,7 +231,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) return yield* next(e)
     const backend = await delegateOf($, e.agentId)
     if (backend === undefined) return yield* next(e)
-    return yield* delegateStep($, e, e.agentId, backend, next.signal)
+    return yield* delegateStep($, e, e.agentId, backend, next.signal, settings)
   }).catch(async function* ($, e, next) {
     // Never let a delegate's step fall through to the placeholder model.
     const backend = await delegateOf($, e.agentId)

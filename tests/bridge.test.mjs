@@ -153,6 +153,17 @@ test("agy: a refused request is declined, and agy is asked to finish without it"
   assert.match(result.report, /declined \(1\):\n- \[execute\] npm test \(pending, permission denied\)/);
 });
 
+test("a turn without the sandbox opens Codex with none, and the headline says so", async () => {
+  const record = path.join(scratch, "codex-record.jsonl");
+  const { result } = await runTurn(
+    { backend: "codex", permission: "ask-for-approval", sandbox: "disabled" },
+    { env: { FAKE_CODEX_SCENARIO: "normal", FAKE_CODEX_RECORD: record } }
+  );
+  const opened = fs.readFileSync(record, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(opened.map(({ method, sandbox }) => ({ method, sandbox })), [{ method: "thread/start", sandbox: "danger-full-access" }]);
+  assert.match(result.report, /· ask-for-approval, no sandbox\n/);
+});
+
 test("a request the bridge cannot read is reported as an error event", async () => {
   const child = spawn(process.execPath, [BRIDGE, "run"], { stdio: ["pipe", "pipe", "pipe"] });
   child.stdin.end("not json");

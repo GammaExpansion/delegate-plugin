@@ -13,6 +13,13 @@
 //   dontAsk            read-only          default            declined
 //
 // A mode this table does not know is taken as default.
+//
+// Codex runs its commands in a sandbox. Some work cannot run in one at all (adb and an
+// emulator, a build that writes to ~/.gradle), so the plugin setting codexSandbox = off
+// takes it away in the two options that let Codex change things, ask-for-approval and
+// approve-for-me. Codex then runs commands without asking. The read-only options keep it:
+// in plan and dontAsk mode nothing is to change, and in default mode Codex can still ask
+// to run one command outside the sandbox, which the user is asked about.
 
 export type Backend = 'codex' | 'agy'
 export type Approvals = 'ask' | 'decline'
@@ -34,10 +41,18 @@ export type Grant = {
   /** The backend's own permission option. */
   permission: string
   approvals: Approvals
+  /** "disabled" when Codex runs this turn without its sandbox; null for the option's own. */
+  sandbox: 'disabled' | null
 }
 
-export function grantFor(backend: Backend, mode: string | undefined): Grant {
+export type Settings = { codexSandbox: 'on' | 'off' }
+
+const UNSANDBOXABLE = new Set(['ask-for-approval', 'approve-for-me'])
+
+export function grantFor(backend: Backend, mode: string | undefined, settings: Settings = { codexSandbox: 'on' }): Grant {
   const known = mode !== undefined && Object.hasOwn(MODES, mode) ? mode : 'default'
   const row = MODES[known] ?? { codex: 'read-only', agy: 'default', approvals: 'ask' }
-  return { mode: known, permission: row[backend], approvals: row.approvals }
+  const permission = row[backend]
+  const sandboxOff = backend === 'codex' && settings.codexSandbox === 'off' && UNSANDBOXABLE.has(permission)
+  return { mode: known, permission, approvals: row.approvals, sandbox: sandboxOff ? 'disabled' : null }
 }

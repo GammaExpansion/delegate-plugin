@@ -55,6 +55,7 @@ function traceFileFor(backendName) {
  * @property {string} cwd
  * @property {string} prompt
  * @property {string} permission       one of the backend's own options
+ * @property {"disabled" | null} [sandbox]   "disabled" to run without the option's sandbox
  * @property {"ask" | "decline"} approvals   whether requests beyond the option are put to the user
  * @property {string | null} [mode]    the conversation's permission mode, for the report
  * @property {string | null} [model]
@@ -128,6 +129,7 @@ async function cmdRun() {
       cwd: request.cwd,
       prompt: request.prompt,
       permission: request.permission,
+      sandbox: request.sandbox || undefined,
       model: request.model || undefined,
       effort: request.effort || undefined,
       resumeSessionId: request.resumeSessionId || undefined,
@@ -155,6 +157,7 @@ async function cmdRun() {
   const report = renderReport({
     backend,
     permission: request.permission,
+    sandbox: request.sandbox ?? null,
     approvals: request.approvals,
     mode: request.mode ?? null,
     model: result.model ?? shown.model,

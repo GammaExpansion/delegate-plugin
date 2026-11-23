@@ -38,6 +38,8 @@ It follows this conversation's permission mode, read every time the delegate sta
 | auto                     | `approve-for-me`   | `auto`                | declined                 |
 | bypass permissions       | `full-access`      | `skip-permissions`    | (nothing is asked)       |
 
+Codex runs its commands in a sandbox. If the user has set the plugin option `codexSandbox` to `off`, Codex runs without it in accept-edits and auto mode, for work a sandbox stops (adb, an emulator, a build that writes outside the repository), and runs commands without asking; the report's headline then says `no sandbox`. Do not suggest turning the sandbox off yourself; if a delegate reports that its sandbox stopped such work, tell the user the option exists.
+
 What was declined is listed in the report. To let the delegate do it, the user switches this conversation to a mode that allows it; then continue the same subagent ("try again") and it carries on with what it knows. Do not ask the delegate to work around a refusal.
 
 Before a delegate turn that can edit, check that its files do not overlap with files being edited here.

@@ -10,6 +10,8 @@ export type TurnRequest = {
   cwd: string
   prompt: string
   permission: string
+  /** "disabled" to run Codex without its sandbox; null for the option's own. */
+  sandbox: 'disabled' | null
   approvals: Approvals
   mode: string
   model: string | null

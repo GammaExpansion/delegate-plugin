@@ -213,7 +213,6 @@ export const codexBackend = {
     }
     if ((await needsOpenaiLogin()) === false) {
       info.auth = "provider";
-      info.hint = "Codex uses a model provider of its own, which needs no OpenAI login. Its key is not checked here; the first task shows whether it works.";
     } else {
       info.auth = "missing";
       info.hint = "Run `codex login` in a terminal.";

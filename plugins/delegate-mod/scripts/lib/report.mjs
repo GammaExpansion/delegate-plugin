@@ -169,7 +169,7 @@ export function renderSetup(report) {
       : backend.auth === "ok"
         ? "ready"
         : backend.auth === "provider"
-          ? "ready (own model provider, no login needed)"
+          ? "ready (own model provider, key not checked)"
           : backend.auth === "missing"
           ? "installed, not logged in"
           : "installed, login not checked";

@@ -7,17 +7,5 @@
     "url": "https://github.com/GammaExpansion"
   },
   "license": "MIT",
-  "types": "./types/index.d.ts",
-  "userConfig": {
-    "codexSandbox": {
-      "type": "string",
-      "title": "Codex sandbox",
-      "description": "off runs Codex without its sandbox when the conversation is in accept-edits or auto mode, for work a sandbox stops, such as adb, an emulator or a build that writes outside the repository. Codex then runs commands without asking. Plan, default and dontAsk mode keep the sandbox.",
-      "options": [
-        "on",
-        "off"
-      ],
-      "default": "on"
-    }
-  }
+  "types": "./types/index.d.ts"
 }

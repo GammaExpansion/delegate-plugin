@@ -17,13 +17,6 @@
 // A task may ask for another option, or another sandbox, on its prompt's first line
 // (options.ts). What asks for less than the mode gives is taken as it is; what asks for more
 // is put to the user first (register.tsx), for that one turn.
-//
-// Codex runs its commands in a sandbox. Some work cannot run in one at all (adb and an
-// emulator, a build that writes to ~/.gradle), so the plugin setting codexSandbox = off
-// takes it away in the two options that let Codex change things, ask-for-approval and
-// approve-for-me. Codex then runs commands without asking. The read-only options keep it:
-// in plan and dontAsk mode nothing is to change, and in default mode Codex can still ask
-// to run one command outside the sandbox, which the user is asked about.
 
 export type Backend = 'codex' | 'agy'
 export type Approvals = 'ask' | 'decline'
@@ -51,18 +44,11 @@ export type Grant = {
 
 export type Sandbox = 'enabled' | 'disabled' | null
 
-export type Settings = { codexSandbox: 'on' | 'off' }
-
-const UNSANDBOXABLE = new Set(['ask-for-approval', 'approve-for-me'])
-
-export function grantFor(backend: Backend, mode: string | undefined, settings: Settings = { codexSandbox: 'on' }): Grant {
+export function grantFor(backend: Backend, mode: string | undefined): Grant {
   const known = mode !== undefined && Object.hasOwn(MODES, mode) ? mode : 'default'
   const row = MODES[known] ?? { codex: 'read-only', agy: 'default', approvals: 'ask' }
-  const permission = row[backend]
-  const sandboxOff = backend === 'codex' && settings.codexSandbox === 'off' && UNSANDBOXABLE.has(permission)
-  return { mode: known, permission, approvals: row.approvals, sandbox: sandboxOff ? 'disabled' : null }
+  return { mode: known, permission: row[backend], approvals: row.approvals, sandbox: null }
 }
-
 // Each backend's options, from the one that may do least. agy's plan and default rank
 // alike: neither edits nor runs a command without asking.
 const RANK: Record<Backend, Record<string, number>> = {
@@ -109,9 +95,6 @@ export function askedFor(backend: Backend, base: Grant, permission: string | nul
     if (word === 'enabled' || word === 'on') box = 'enabled'
     else if (word === 'disabled' || word === 'off') box = 'disabled'
     else return { error: `Unknown --sandbox "${sandbox}". Use enabled or disabled.` }
-  } else if (permission !== null) {
-    // Another option comes with its own sandbox, unless the codexSandbox setting takes it away.
-    box = backend === 'codex' && base.sandbox === 'disabled' && UNSANDBOXABLE.has(option) ? 'disabled' : null
   }
   if (backend === 'codex' && option === 'read-only' && box === 'disabled') {
     return { error: "Codex's read-only is its sandbox, so it cannot run with --sandbox disabled. Pick another --permission." }

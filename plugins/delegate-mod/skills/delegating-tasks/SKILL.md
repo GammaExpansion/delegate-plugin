@@ -28,7 +28,7 @@ Use `--model` and `--effort` only when the user asks for a model or an effort. B
 
 ## What a delegate may do
 
-It follows this conversation's permission mode, read every time the delegate starts or is continued. Nothing is written on the prompt for it.
+It follows this conversation's permission mode, read every time the delegate starts or is continued. Nothing is written on the prompt for it, unless the user asks for more or less (below).
 
 | This conversation's mode | Codex runs with    | Antigravity runs with | A request beyond that    |
 | ------------------------ | ------------------ | --------------------- | ------------------------ |
@@ -37,8 +37,6 @@ It follows this conversation's permission mode, read every time the delegate sta
 | accept edits             | `ask-for-approval` | `accept-edits`        | the user is asked        |
 | auto                     | `approve-for-me`   | `auto`                | declined                 |
 | bypass permissions       | `full-access`      | `skip-permissions`    | (nothing is asked)       |
-
-Codex runs its commands in a sandbox. If the user has set the plugin option `codexSandbox` to `off`, Codex runs without it in accept-edits and auto mode, for work a sandbox stops (adb, an emulator, a build that writes outside the repository), and runs commands without asking; the report's headline then says `no sandbox`. Do not suggest turning the sandbox off yourself; if a delegate reports that its sandbox stopped such work, tell the user the option exists.
 
 ### When the user asks for more, or less, for one task
 

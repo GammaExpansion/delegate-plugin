@@ -16,7 +16,7 @@ import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './age
 import { endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
 import { oneLine, runTurn, type ApprovalAnswer, type ApprovalRequest } from './bridge'
 import { takeOptions } from './options'
-import { askedFor, describe, grantFor, type Backend, type Grant, type Settings } from './permissions'
+import { askedFor, describe, grantFor, type Backend, type Grant } from './permissions'
 
 /** What the latest spawn of a delegate said: the backend, the mode, and the row it came from. */
 type Spawn = { backend: Backend; mode: string | undefined; rowId: string }
@@ -164,12 +164,12 @@ function withNotes(report: string, notes: string[]): string {
 }
 
 /** Runs one turn of a delegate on its backend and returns the report, or null if it was stopped. */
-async function runDelegate($: EngineInterface, agentId: string, backend: Backend, signal: AbortSignal, settings: Settings): Promise<string | null> {
+async function runDelegate($: EngineInterface, agentId: string, backend: Backend, signal: AbortSignal): Promise<string | null> {
   const spawn = spawns.get(agentId)
   const leading = takeOptions(await latestMessage($, agentId))
   if (leading.task === '') return `[delegate] ${AGENT_NAME[backend]} · failed\nerror: the prompt holds no task.`
   const notes: string[] = []
-  let grant = grantFor(backend, spawn?.mode, settings)
+  let grant = grantFor(backend, spawn?.mode)
   if (leading.permission !== null || leading.sandbox !== null) {
     const asked = askedFor(backend, grant, leading.permission, leading.sandbox)
     if ('error' in asked) return `[delegate] ${AGENT_NAME[backend]} · failed\nerror: ${asked.error}`
@@ -231,13 +231,13 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
   return report
 }
 
-async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: string, backend: Backend, signal: AbortSignal, settings: Settings) {
+async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: string, backend: Backend, signal: AbortSignal) {
   const sent = handedBack.get(e.turnId)
   if (sent !== undefined) {
     handedBack.delete(e.turnId)
     return yield* (await handBackFailed($, agentId, sent.id)) ? say(e, sent.report) : endTurn(e)
   }
-  const report = await runDelegate($, agentId, backend, signal, settings)
+  const report = await runDelegate($, agentId, backend, signal)
   if (report === null) return yield* endTurn(e)
   return yield* handBack(e, report, id => handedBack.set(e.turnId, { id, report }))
 }
@@ -260,8 +260,7 @@ const backendArg = (text: unknown): string[] => {
   return word === 'codex' || word === 'agy' ? [word] : []
 }
 
-export const register: Register = (on, options) => {
-  const settings: Settings = { codexSandbox: options.codexSandbox === 'off' ? 'off' : 'on' }
+export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     // The model of these agents is never called, so they need no tools of their own; the
@@ -307,7 +306,7 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined) return yield* next(e)
     const backend = await delegateOf($, e.agentId)
     if (backend === undefined) return yield* next(e)
-    return yield* delegateStep($, e, e.agentId, backend, next.signal, settings)
+    return yield* delegateStep($, e, e.agentId, backend, next.signal)
   }).catch(async function* ($, e, next) {
     // Never let a delegate's step fall through to the placeholder model.
     const backend = await delegateOf($, e.agentId)

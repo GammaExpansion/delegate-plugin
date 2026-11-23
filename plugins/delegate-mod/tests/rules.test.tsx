@@ -64,18 +64,3 @@ test('an option the backend lacks, or Codex read-only without its sandbox, is re
   expect('error' in askedFor('codex', base, null, 'disabled')).toBe(true)
   expect('error' in askedFor('agy', grantFor('agy', 'default'), null, 'maybe')).toBe(true)
 })
-
-test('codexSandbox off takes the sandbox away only where Codex may change things', async () => {
-  const off = { codexSandbox: 'off' } as const
-  expect(grantFor('codex', 'acceptEdits', off).sandbox).toBe('disabled')
-  expect(grantFor('codex', 'auto', off).sandbox).toBe('disabled')
-  // Read-only options keep it: plan and dontAsk change nothing, default asks per command.
-  expect(grantFor('codex', 'plan', off).sandbox).toBe(null)
-  expect(grantFor('codex', 'default', off).sandbox).toBe(null)
-  expect(grantFor('codex', 'dontAsk', off).sandbox).toBe(null)
-  // full-access has none to take away, and the setting is Codex's alone.
-  expect(grantFor('codex', 'bypassPermissions', off).sandbox).toBe(null)
-  expect(grantFor('agy', 'acceptEdits', off).sandbox).toBe(null)
-  // On, the default, nothing changes.
-  expect(grantFor('codex', 'acceptEdits', { codexSandbox: 'on' }).sandbox).toBe(null)
-})

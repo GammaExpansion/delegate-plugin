@@ -103,18 +103,18 @@ function toAction(item) {
 /**
  * Codex's own answers to a request for approval, as the user is offered them, in the
  * words of Codex's own approval prompt where it has them: the declining ones first.
- * "acceptForSession" is marked lasting: Codex keeps it only as long as its app-server, one
- * turn here, so the plugin remembers it for the rest of the conversation (register.tsx).
- * Codex's persistent rules (an exec policy or network policy amendment) are not offered.
+ * Codex keeps "acceptForSession" as long as its app-server, which here is the one task it
+ * was started for, and the label says so. Codex's persistent rules (an exec policy or
+ * network policy amendment) are not offered.
  */
-const DECISIONS = (lastingLabel) => [
+const DECISIONS = (thing) => [
   { id: "decline", label: "No, continue without it", allow: false },
   { id: "accept", label: "Yes, just this once", allow: true },
-  { id: "acceptForSession", label: lastingLabel, allow: true, lasting: true },
+  { id: "acceptForSession", label: `Yes, and don't ask again for ${thing} until Codex finishes this task`, allow: true },
   { id: "cancel", label: "No, and stop Codex", allow: false, stop: true }
 ];
-const COMMAND_DECISIONS = DECISIONS("Yes, and don't ask again for this command in this session");
-const FILE_DECISIONS = DECISIONS("Yes, and don't ask again for these files");
+const COMMAND_DECISIONS = DECISIONS("this command");
+const FILE_DECISIONS = DECISIONS("these files");
 const PLAIN_DECISIONS = COMMAND_DECISIONS.filter((choice) => choice.id === "decline" || choice.id === "accept");
 
 /**

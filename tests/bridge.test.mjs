@@ -79,13 +79,9 @@ test("a request for approval is put to the caller with Codex's own answers, and 
     [
       "decline=No, continue without it",
       "accept=Yes, just this once",
-      "acceptForSession=Yes, and don't ask again for this command in this session",
+      "acceptForSession=Yes, and don't ask again for this command until Codex finishes this task",
       "cancel=No, and stop Codex"
     ]
-  );
-  assert.deepEqual(
-    asked[0].choices.map((choice) => Boolean(choice.lasting)),
-    [false, false, true, false]
   );
   assert.equal(result.result.text, "the answer was accept");
   assert.doesNotMatch(result.report, /declined/);
@@ -165,15 +161,10 @@ test("agy: an allowed request runs, and the answer comes after it", async () => 
     }
   );
   assert.deepEqual(asked.map(({ kind, title }) => ({ kind, title })), [{ kind: "execute", title: "npm test" }]);
-  // The same answers as for Codex, each standing for one of agy's own options.
+  // Codex's words for agy's own options; "don't ask again" only where agy offers it.
   assert.deepEqual(
     asked[0].choices.map(({ id, label, optionId }) => `${id}=${label}=${optionId}`),
-    [
-      "decline=No, continue without it=no",
-      "accept=Yes, just this once=yes",
-      "acceptForSession=Yes, and don't ask again for this command in this session=yes",
-      "cancel=No, and stop Antigravity=no"
-    ]
+    ["decline=No, continue without it=no", "accept=Yes, just this once=yes", "cancel=No, and stop Antigravity=no"]
   );
   assert.equal(result.result.status, "completed");
   assert.equal(result.result.text, "Tests passed: 40/40");

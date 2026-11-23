@@ -34,10 +34,9 @@ import { codexBackend } from "./codex.mjs";
  * @property {string} title           The command, the files, or what the agent says it wants.
  * @property {string | null} cwd      Where a command would run, when the agent says.
  * @property {string | null} reason   Why, or which paths, when the agent says.
- * @property {{ id: string, label: string, allow: boolean, lasting?: boolean, stop?: boolean }[]} choices
- *           The answers the user is offered, declining ones first, at most four. A lasting
- *           one allows the same request again without asking, which the agent itself keeps
- *           only for as long as its process lives; one that stops also ends the turn.
+ * @property {{ id: string, label: string, allow: boolean, stop?: boolean }[]} choices
+ *           The answers the user is offered, declining ones first, at most four. One that
+ *           stops also ends the turn.
  *
  * @typedef {{ type: "session", sessionId: string, model: string | null, effort?: string | null }   effort only where it is not already part of the model id
  *   | { type: "action", action: Action, output?: string }      a tool call finished; output is its clipped text

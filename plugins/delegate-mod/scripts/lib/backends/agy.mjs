@@ -167,16 +167,15 @@ function fetchModels() {
 }
 
 // agy offers its own options on a request (in practice "Allow" and "Deny": allow_once and
-// reject_once). The user is offered the same four answers as for Codex, each standing for
-// one of agy's options: no, yes once, yes and don't ask again (agy's allow_always where it
-// has one, else allow_once, which the plugin remembers for the conversation), and no with
-// the turn stopped. Without an allow_once and a reject_once to stand on, agy's own
-// options are offered as they are, refusals first.
+// reject_once). The user is offered them in the same words as Codex's: no, yes once, yes
+// and don't ask again (only where agy itself offers allow_always), and no with the turn
+// stopped. Without an allow_once and a reject_once to stand on, agy's own options are
+// offered as they are, refusals first.
 const KIND_ORDER = ["reject_once", "reject_always", "allow_once", "allow_always"];
 const kindRank = (kind) => (KIND_ORDER.includes(kind) ? KIND_ORDER.indexOf(kind) : String(kind).startsWith("reject") ? 1.5 : 3.5);
 const FILE_KINDS = new Set(["edit", "delete", "move"]);
 
-/** @returns {{ id: string, label: string, allow: boolean, lasting?: boolean, optionId: string, stop?: boolean }[]} */
+/** @returns {{ id: string, label: string, allow: boolean, optionId: string, stop?: boolean }[]} */
 function choicesOf(options, kind) {
   const usable = options.filter((option) => option?.optionId);
   const once = usable.find((option) => option.kind === "allow_once");
@@ -187,20 +186,14 @@ function choicesOf(options, kind) {
     return [
       { id: "decline", label: "No, continue without it", allow: false, optionId: reject.optionId },
       { id: "accept", label: "Yes, just this once", allow: true, optionId: once.optionId },
-      { id: "acceptForSession", label: `Yes, and don't ask again ${what} in this session`, allow: true, lasting: true, optionId: (always ?? once).optionId },
+      ...(always ? [{ id: "acceptAlways", label: `Yes, and don't ask again ${what}`, allow: true, optionId: always.optionId }] : []),
       { id: "cancel", label: "No, and stop Antigravity", allow: false, optionId: reject.optionId, stop: true }
     ];
   }
   return [...usable]
     .sort((a, b) => kindRank(a.kind) - kindRank(b.kind))
     .slice(0, 4)
-    .map((option) => ({
-      id: option.optionId,
-      label: option.name || option.kind,
-      allow: String(option.kind).startsWith("allow"),
-      lasting: option.kind === "allow_always",
-      optionId: option.optionId
-    }));
+    .map((option) => ({ id: option.optionId, label: option.name || option.kind, allow: String(option.kind).startsWith("allow"), optionId: option.optionId }));
 }
 
 /**

@@ -281,9 +281,13 @@ export const register: Register = (on, options) => {
         properties: { backend: { type: 'string', enum: ['codex', 'agy'], description: 'One backend; both when left out.' } },
       },
     })
-    // A plugin's own command is run as /<name>, with no plugin prefix, so the names carry it.
-    await $.command.register({ name: 'delegate-setup', description: 'Check that Node and the Codex and Antigravity CLIs are ready for delegate' })
-    await $.command.register({ name: 'delegate-models', description: 'List the models Codex and Antigravity accept', argumentHint: '[codex|agy]' })
+    // /delegate:setup and /delegate:models are markdown commands (commands/), which Claude
+    // Code names with the plugin's prefix; they call this tool and the models tool.
+    await $.tool.register({
+      name: 'setup',
+      description: 'Checks that Node and the Codex and Antigravity CLIs are installed and signed in for the delegate plugin. Takes no arguments.',
+      inputSchema: { type: 'object', properties: {} },
+    })
     return next(e)
   })
 
@@ -338,10 +342,5 @@ export const register: Register = (on, options) => {
     return { result: await bridgeText($, ['models', ...backendArg(input.backend)]) }
   })
 
-  on('command.run', { command: 'delegate-setup' }, async $ => ({ text: await bridgeText($, ['setup']), isTextDisplayOnly: true }))
-
-  on('command.run', { command: 'delegate-models' }, async ($, e) => ({
-    text: await bridgeText($, ['models', ...backendArg(e.args)]),
-    isTextDisplayOnly: true,
-  }))
+  on('tool.call', { tool: 'mcp__delegate__setup' }, async $ => ({ result: await bridgeText($, ['setup']) }))
 }

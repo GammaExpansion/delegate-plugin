@@ -23,11 +23,14 @@ const READ_KINDS = new Set(["read", "search", "think"]);
 //   - accept-edits     -> it edits files in the workspace without asking, and asks before
 //                         commands and before touching anything outside the workspace.
 //   - auto             -> it edits and runs commands without asking, and asks only about
-//                         what it judges risky.
+//                         what it judges risky. Its commands run in agy's terminal sandbox,
+//                         which cannot be left out; where agy does not offer the mode, the
+//                         turn runs with accept-edits instead (see AUTO_FALLBACK).
 //   - skip-permissions -> `agy --dangerously-skip-permissions` (Turbo in its desktop app):
 //                         its permission checks are off, so it does not ask at all.
 //                         Should it ask anyway, the answer is yes.
-// `--sandbox enabled` adds agy's own `--sandbox` flag, which restricts its terminal.
+// `--sandbox enabled` adds agy's own `--sandbox` flag, which restricts its terminal. There
+// is no flag to take a sandbox away: agy has none unless asked, except in auto.
 const PERMISSIONS = {
   plan: { mode: "plan" },
   default: { mode: "default" },
@@ -36,9 +39,16 @@ const PERMISSIONS = {
   "skip-permissions": { mode: "default", args: ["--dangerously-skip-permissions"], allowAll: true }
 };
 
+// The option a turn runs with where agy refuses its auto mode, which it does where its
+// terminal sandbox cannot run or the account is not offered the mode.
+const AUTO_FALLBACK = "accept-edits";
+
 function settingsFor({ permission, sandbox }) {
   const name = pickPermission(agyBackend, permission);
   const choice = pickSandbox(sandbox);
+  if (name === "auto" && choice === "disabled") {
+    throw new Error('Antigravity\'s "auto" runs its commands in agy\'s sandbox, so it cannot run with --sandbox disabled. Pick another --permission.');
+  }
   const option = PERMISSIONS[name];
   return {
     permission: name,
@@ -258,7 +268,9 @@ export const agyBackend = {
    * @returns {Promise<import("./index.mjs").RunResult>}
    */
   async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent, onApproval }) {
-    const { permission: permissionName, settings: policy } = settingsFor({ permission, sandbox });
+    const { permission: askedPermission, settings: policy } = settingsFor({ permission, sandbox });
+    // The option the turn really runs with: another one where agy refuses auto.
+    let permissionName = askedPermission;
     const client = new StdioRpcClient({
       command: "agy",
       args: ["acp", ...policy.args],
@@ -450,7 +462,7 @@ export const agyBackend = {
       });
 
       let opened = null;
-      const resumeNotes = [];
+      const startNotes = [];
       if (resumeSessionId) {
         // Stays set until the history has gone quiet, which is checked just before the prompt.
         replaying = true;
@@ -462,7 +474,7 @@ export const agyBackend = {
           // A conversation whose session is gone goes on in a new one rather than failing
           // every turn from here on.
           replaying = false;
-          resumeNotes.push(`the earlier agy session could not be resumed (${error?.message ?? error}), so this turn started a new one, which knows nothing of the earlier conversation`);
+          startNotes.push(`the earlier agy session could not be resumed (${error?.message ?? error}), so this turn started a new one, which knows nothing of the earlier conversation`);
         }
       }
       if (!opened) {
@@ -481,8 +493,16 @@ export const agyBackend = {
         }
       }
       // Set on every turn: a resumed session would otherwise keep the mode of its last turn,
-      // and each turn may name a different one. If agy refuses the mode, the turn fails.
-      await client.request("session/set_mode", { sessionId, modeId: policy.mode });
+      // and each turn may name a different one. If agy refuses the mode, the turn fails,
+      // except for auto, which gives way to an option that may do less.
+      try {
+        await client.request("session/set_mode", { sessionId, modeId: policy.mode });
+      } catch (error) {
+        if (policy.mode !== "auto") throw error;
+        await client.request("session/set_mode", { sessionId, modeId: PERMISSIONS[AUTO_FALLBACK].mode });
+        permissionName = AUTO_FALLBACK;
+        startNotes.push(`agy does not offer its auto mode here (${error?.message ?? error}), so this turn ran with ${AUTO_FALLBACK}, which edits files and asks before every command`);
+      }
       if (effort) {
         try {
           await client.request("session/set_config_option", { sessionId, configId: "thought_level", value: effort });
@@ -493,7 +513,7 @@ export const agyBackend = {
       onEvent({ type: "session", sessionId, model: usedModel });
 
       if (signal?.aborted) {
-        return { status: "cancelled", sessionId, model: usedModel, text: "", actions: actionsList(), usage: null, error: null };
+        return { status: "cancelled", sessionId, model: usedModel, permission: permissionName, text: "", actions: actionsList(), usage: null, error: null, notes: startNotes };
       }
 
       // If agy never answers a cancel, stop waiting. Closing the client below ends agy.
@@ -621,12 +641,12 @@ export const agyBackend = {
 
       // A command that outlives the turn is worth a word to whoever reads the result,
       // however the turn ended: it is still running on this machine.
-      const notes = [...resumeNotes];
+      const notes = [...startNotes];
       if (background && background.message !== error) notes.push(background.message);
       const daemons = actions.filter((action) => stillOpen(action) && action.daemon);
       if (daemons.length) notes.push(`agy left a command running, as it meant to: ${named(daemons)}`);
 
-      return { status, sessionId, model: usedModel, text: answer, actions, usage, error, notes };
+      return { status, sessionId, model: usedModel, permission: permissionName, text: answer, actions, usage, error, notes };
     } finally {
       stopGrace();
       clearInterval(flushTimer);

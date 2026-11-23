@@ -335,4 +335,20 @@ test("agy: stopped while the user is asked, the request is answered cancelled an
   assert.equal(result.result.status, "cancelled");
 });
 
+test("agy: where it refuses its auto mode, the turn runs with accept-edits, and the report says so", async () => {
+  const { result } = await runTurn(
+    { backend: "agy", permission: "auto", mode: "auto" },
+    { env: { FAKE_AGY_SCENARIO: "late-close", FAKE_AGY_NO_AUTO: "1" } }
+  );
+  assert.equal(result.result.status, "completed");
+  assert.match(result.report, /^\[delegate\] Gemini Agent \(fake-gemini\) · completed · \d+\.\ds · accept-edits\n/);
+  assert.match(result.report, /note: agy does not offer its auto mode here \(Auto mode is not available: it needs the OS terminal sandbox\), so this turn ran with accept-edits/);
+});
+
+test("agy: auto cannot run without its sandbox, and a turn that fails without a word ends at its error", async () => {
+  const { result } = await runTurn({ backend: "agy", permission: "auto", sandbox: "disabled" });
+  assert.equal(result.result.status, "failed");
+  assert.match(result.report, /^\[delegate\] Gemini Agent · failed · \d+\.\ds · auto, no sandbox\nerror: Antigravity's "auto" runs its commands in agy's sandbox, so it cannot run with --sandbox disabled\. Pick another --permission\.$/);
+});
+
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));

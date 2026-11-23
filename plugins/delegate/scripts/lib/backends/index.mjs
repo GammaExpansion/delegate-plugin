@@ -54,6 +54,7 @@ import { codexBackend } from "./codex.mjs";
  * @typedef {object} RunResult
  * @property {"completed" | "cancelled" | "failed"} status
  * @property {string | null} sessionId
+ * @property {string} [permission]   The option the turn ran with, where it is not the one asked for.
  * @property {string | null} model
  * @property {string} text
  * @property {Action[]} actions

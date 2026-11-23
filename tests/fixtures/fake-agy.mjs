@@ -19,6 +19,7 @@
 //   ask-always   the same, but agy offers only "Always allow" and no refusal
 //
 // With FAKE_AGY_LOAD_FAILS=1, session/load fails, as for a session that is gone.
+// With FAKE_AGY_NO_AUTO=1, session/set_mode refuses auto, as agy does where it lacks its sandbox.
 //
 // A resumed session (`session/load`) replays its history as updates. A real agy answers
 // the load while a long history is still on its way, which these two play out:
@@ -157,6 +158,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     case "session/prompt":
       lastPrompt = message.params?.prompt?.[0]?.text ?? "";
       return void playTurn(message.id);
+    case "session/set_mode":
+      if (process.env.FAKE_AGY_NO_AUTO === "1" && message.params?.modeId === "auto") {
+        return send({ id: message.id, error: { code: -32603, message: "Auto mode is not available: it needs the OS terminal sandbox" } });
+      }
+      return send({ id: message.id, result: {} });
     default:
       return send({ id: message.id, result: {} });
   }

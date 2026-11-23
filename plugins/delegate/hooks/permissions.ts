@@ -18,6 +18,8 @@
 // (options.ts). What asks for less than the mode gives is taken as it is; what asks for more
 // is put to the user first (register.tsx), for that one turn.
 
+import { PRODUCT } from './agents'
+
 export type Backend = 'codex' | 'agy'
 export type Approvals = 'ask' | 'decline'
 
@@ -49,15 +51,15 @@ export function grantFor(backend: Backend, mode: string | undefined): Grant {
   const row = MODES[known] ?? { codex: 'read-only', agy: 'default', approvals: 'ask' }
   return { mode: known, permission: row[backend], approvals: row.approvals, sandbox: null }
 }
+
 // Each backend's options, from the one that may do least. agy's plan and default rank
 // alike: neither edits nor runs a command without asking.
 const RANK: Record<Backend, Record<string, number>> = {
   codex: { 'read-only': 0, 'ask-for-approval': 1, 'approve-for-me': 2, 'full-access': 3 },
   agy: { plan: 0, default: 0, 'accept-edits': 1, auto: 2, 'skip-permissions': 3 },
 }
-const PRODUCT: Record<Backend, string> = { codex: 'Codex', agy: 'Antigravity' }
 
-export const optionsOf = (backend: Backend): string[] => Object.keys(RANK[backend])
+const optionsOf = (backend: Backend): string[] => Object.keys(RANK[backend])
 
 /** Whether commands run with no sandbox around them. agy has none unless one is asked for. */
 function unsandboxed(backend: Backend, permission: string, sandbox: Sandbox): boolean {

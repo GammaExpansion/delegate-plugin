@@ -1,11 +1,6 @@
 ---
-description: Check whether the Codex and Antigravity CLIs are installed and ready
-disable-model-invocation: true
-allowed-tools: Bash(node:*)
+description: Check that Node and the Codex and Antigravity CLIs are ready for delegate
+allowed-tools: mcp__delegate__setup
 ---
 
-!`node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" setup`
-
-Show the output to the user. For any backend that is not ready, repeat the hint printed under it.
-
-Do not install anything or run a login command yourself. Logging in is interactive, so tell the user to run it in their own terminal.
+Call the `mcp__delegate__setup` tool. Show its output to the user exactly as it is, in a code block, and write nothing else.

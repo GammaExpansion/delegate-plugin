@@ -1,5 +1,5 @@
 // The two agent types, as Claude sees them in its list of subagents. Their model is never
-// called: the turn.step hook answers every model request of their loops (register.ts).
+// called: the turn.step hook answers every model request of their loops (register.tsx).
 
 import type { Backend } from './permissions'
 
@@ -11,7 +11,7 @@ export const AGENT_NAME: Record<Backend, string> = { codex: 'Codex Agent', agy: 
 /** The product, for a question put to the user (at most 12 characters). */
 export const PRODUCT: Record<Backend, string> = { codex: 'Codex', agy: 'Antigravity' }
 
-export const agentType = (backend: Backend) => `delegate:${backend}`
+const agentType = (backend: Backend) => `delegate:${backend}`
 
 export function backendOfType(type: string | undefined): Backend | undefined {
   return BACKENDS.find(backend => agentType(backend) === type)

@@ -1,10 +1,9 @@
 ---
-description: List the models each delegate backend can run
+description: List the models Codex and Antigravity accept
 argument-hint: "[codex|agy]"
-disable-model-invocation: true
-allowed-tools: Bash(node:*)
+allowed-tools: mcp__delegate__models
 ---
 
-!`node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" models "$ARGUMENTS"`
+Call the `mcp__delegate__models` tool, with `backend` set to the argument below if it is `codex` or `agy`, and left out otherwise. Show its output to the user exactly as it is, in a code block, and write nothing else.
 
-Show the output to the user unchanged, in a code block. It is laid out as tables, so keep its spacing.
+Argument: $ARGUMENTS

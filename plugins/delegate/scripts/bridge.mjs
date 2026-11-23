@@ -32,7 +32,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { parseArgs } from "./lib/args.mjs";
 import { BACKENDS, getBackend } from "./lib/backends/index.mjs";
 import { renderModels, renderReport, renderSetup } from "./lib/report.mjs";
 
@@ -186,10 +185,8 @@ async function cmdRun() {
   return 0;
 }
 
-async function cmdModels(argv) {
-  const { options, positionals } = parseArgs(argv, { booleans: ["json"], values: ["cwd"] });
-  const cwd = path.resolve(options.cwd ?? process.cwd());
-  const wanted = positionals[0];
+async function cmdModels([wanted]) {
+  const cwd = process.cwd();
   const backends = wanted ? [getBackend(wanted)] : Object.values(BACKENDS);
   const entries = await Promise.all(
     backends.map(async (backend) => {
@@ -200,12 +197,11 @@ async function cmdModels(argv) {
       }
     })
   );
-  console.log(options.json ? JSON.stringify(entries, null, 2) : renderModels(entries));
+  console.log(renderModels(entries));
   return entries.some((entry) => entry.list) ? 0 : 1;
 }
 
-async function cmdSetup(argv) {
-  const { options } = parseArgs(argv, { booleans: ["json"] });
+async function cmdSetup() {
   const [major, minor] = process.versions.node.split(".").map(Number);
   const report = {
     node: { version: process.versions.node, ok: major > 18 || (major === 18 && minor >= 18) },
@@ -213,7 +209,7 @@ async function cmdSetup(argv) {
       Object.values(BACKENDS).map(async (backend) => ({ name: backend.name, label: backend.label, ...(await backend.check()) }))
     )
   };
-  console.log(options.json ? JSON.stringify(report, null, 2) : renderSetup(report));
+  console.log(renderSetup(report));
   return 0;
 }
 
@@ -225,7 +221,7 @@ async function main() {
     case "models":
       return cmdModels(argv);
     case "setup":
-      return cmdSetup(argv);
+      return cmdSetup();
     default:
       throw new Error(`Unknown command "${command ?? ""}". Use run, models or setup.`);
   }

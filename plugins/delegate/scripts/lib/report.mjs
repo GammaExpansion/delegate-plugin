@@ -4,7 +4,7 @@ import { effortLabel } from "./backends/shared.mjs";
 import { oneLine } from "./text.mjs";
 
 /** "17.1s", "3m 05s", "1h 02m". */
-export function formatDuration(ms) {
+function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return "?";
   const seconds = ms / 1000;
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
@@ -14,7 +14,7 @@ export function formatDuration(ms) {
 }
 
 /** "Codex Agent (gpt-6.2-astra xHigh)", or the bare name while the model is not known. */
-export function agentLabel(backend, model, effort) {
+function agentLabel(backend, model, effort) {
   if (!model) return backend.agentName;
   const level = effortLabel(effort);
   return `${backend.agentName} (${model}${level ? ` ${level}` : ""})`;

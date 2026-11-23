@@ -1,9 +1,10 @@
 // Antigravity backend: drives `agy acp` (Agent Client Protocol over stdio).
 //
 // Permissions: a turn runs under one of agy's own permission options (see PERMISSIONS),
-// which is a session mode or the flag that switches its checks off. Nobody is there to
-// approve anything while a delegate runs, so what agy asks about is declined and listed
-// in the result. The one exception is reading inside the workspace, which is allowed.
+// which is a session mode or the flag that switches its checks off. What agy asks about
+// goes to `onApproval` with agy's own options to choose from; without it, or without a
+// choice, it is declined and listed in the result. Reading inside the workspace is
+// allowed without asking anyone.
 import { execCommandSync } from "../command.mjs";
 import fs from "node:fs";
 import path from "node:path";
@@ -50,10 +51,15 @@ function settingsFor({ permission, sandbox }) {
 // told, at most this many times, that nobody can approve and asked to finish without.
 const MAX_NUDGES = 2;
 
+/** The user's own words about requests they did not allow, as agy is told them next. */
+function relayWords(entries) {
+  return entries.map(({ what, words }) => `About your request (${what}): the user did not allow it, and wrote:\n\n${words}`).join("\n\n");
+}
+
 /** What agy is told after requests of its were declined and it stopped without a word. */
 function nudgeAfterDeclines(declined) {
   return [
-    "These requests were declined, because nobody is there to approve requests in this run:",
+    "These requests were declined:",
     ...declined.map((entry) => `- ${entry}`),
     "Do not ask for them again. Finish what you can without them, then say plainly what you could not do and what it would have needed."
   ].join("\n");
@@ -160,6 +166,38 @@ function fetchModels() {
   return models;
 }
 
+// agy offers its own options on a request (in practice "Allow" and "Deny": allow_once and
+// reject_once). The user is offered them in the same words as Codex's: no, yes once, yes
+// and don't ask again (only where agy itself offers allow_always), and no with the turn
+// stopped. Without an allow_once and a reject_once to stand on, agy's own options are
+// offered as they are, refusals first.
+const KIND_ORDER = ["reject_once", "reject_always", "allow_once", "allow_always"];
+const kindRank = (kind) => (KIND_ORDER.includes(kind) ? KIND_ORDER.indexOf(kind) : String(kind).startsWith("reject") ? 1.5 : 3.5);
+const FILE_KINDS = new Set(["edit", "delete", "move"]);
+
+/** @returns {{ id: string, label: string, allow: boolean, optionId: string | null, stop?: boolean }[]} */
+function choicesOf(options, kind) {
+  const usable = options.filter((option) => option?.optionId);
+  const once = usable.find((option) => option.kind === "allow_once");
+  const always = usable.find((option) => option.kind === "allow_always");
+  const reject = usable.find((option) => option.kind === "reject_once");
+  if (once && reject) {
+    const what = kind === "execute" ? "for this command" : FILE_KINDS.has(kind) ? "for these files" : "for this";
+    return [
+      { id: "decline", label: "No, continue without it", allow: false, optionId: reject.optionId },
+      { id: "accept", label: "Yes, just this once", allow: true, optionId: once.optionId },
+      ...(always ? [{ id: "acceptAlways", label: `Yes, and don't ask again ${what}`, allow: true, optionId: always.optionId }] : []),
+      { id: "cancel", label: "No, and stop Antigravity", allow: false, optionId: reject.optionId, stop: true }
+    ];
+  }
+  const own = [...usable]
+    .sort((a, b) => kindRank(a.kind) - kindRank(b.kind))
+    .map((option) => ({ id: option.optionId, label: option.name || option.kind, allow: String(option.kind).startsWith("allow"), optionId: option.optionId }));
+  // Without a refusal of agy's own, one is added in front: it answers "cancelled".
+  if (!own.some((choice) => !choice.allow)) own.unshift({ id: "decline", label: "No, continue without it", allow: false, optionId: null });
+  return own.slice(0, 4);
+}
+
 /**
  * The option that answers one request. An approval is only ever for this one request,
  * never a lasting one. A refusal may be any kind of "reject".
@@ -219,7 +257,7 @@ export const agyBackend = {
    * @param {import("./index.mjs").RunOptions} options
    * @returns {Promise<import("./index.mjs").RunResult>}
    */
-  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent }) {
+  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent, onApproval }) {
     const { permission: permissionName, settings: policy } = settingsFor({ permission, sandbox });
     const client = new StdioRpcClient({
       command: "agy",
@@ -237,6 +275,9 @@ export const agyBackend = {
     // Requests declined since agy last said anything. If its turn ends with some still
     // here, it stopped at the refusal without a word (see MAX_NUDGES).
     const unanswered = [];
+    // What the user wrote in place of answering a request. agy takes no message during a
+    // turn, so it is told after the turn, whatever it said meanwhile.
+    const userWords = [];
     // agy speaks in several stretches, with thinking and tool calls in between. They are
     // kept apart in the final message, or one stretch would run straight into the next.
     let messageBroken = false;
@@ -308,6 +349,7 @@ export const agyBackend = {
             status: update.status ?? previous.status
           };
           if (update.rawInput?.IsDaemon === true) action.daemon = true;
+          if (typeof update.rawInput?.CommandLine === "string") action.command = update.rawInput.CommandLine;
           tools.set(update.toolCallId, action);
           if (!known) {
             flush("thinking");
@@ -352,14 +394,43 @@ export const agyBackend = {
         call.kind === "think" ||
         (READ_KINDS.has(call.kind) && paths.length > 0 && paths.every((target) => isInside(workspace, target)));
 
-      const allow = Boolean(policy.allowAll || harmless);
-      const option = pickOption(params?.options ?? [], allow);
+      let allow = Boolean(policy.allowAll || harmless);
+      let asked = false;
+      let option = null;
+      let stop = false;
+      const choices = choicesOf(params?.options ?? [], call.kind ?? entry.kind);
+      if (!allow && onApproval && !signal?.aborted && choices.some((choice) => choice.allow)) {
+        asked = true;
+        // The command line itself where agy gives it, rather than its title for the call.
+        const command = typeof call.rawInput?.CommandLine === "string" ? call.rawInput.CommandLine : tools.get(call.toolCallId)?.command;
+        const shown = choices.map(({ optionId: _optionId, ...choice }) => choice);
+        const answer = await onApproval({ kind: entry.kind ?? "tool", title: command ?? entry.title, cwd: null, reason: paths.length ? paths.join(", ") : null, choices: shown });
+        if (signal?.aborted) {
+          // The turn was stopped while the user was asked: ACP wants "cancelled" then.
+          tools.set(call.toolCallId, { ...(tools.get(call.toolCallId) ?? entry), permission: "denied" });
+          return { outcome: { outcome: "cancelled" } };
+        }
+        const words = answer && typeof answer === "object" && typeof answer.text === "string" ? answer.text.trim() : "";
+        if (words) userWords.push({ what: `${entry.kind ?? "tool"} ${oneLine(entry.title, 160)}`, words });
+        const picked =
+          typeof answer === "string" ? choices.find((choice) => choice.id === answer) : null;
+        allow = Boolean(picked?.allow);
+        stop = Boolean(picked?.stop);
+        option = picked ? (params?.options ?? []).find((candidate) => candidate.optionId === picked.optionId) ?? null : null;
+      }
+      option ??= pickOption(params?.options ?? [], allow);
       const allowed = allow && Boolean(option);
       tools.set(call.toolCallId, { ...(tools.get(call.toolCallId) ?? entry), permission: allowed ? "allowed" : "denied" });
       if (!allowed) {
         const what = `${entry.kind} ${oneLine(entry.title, 160)}`;
         unanswered.push(what);
-        onEvent({ type: "note", text: `declined (permission ${permissionName}, nobody to ask): ${what}` });
+        onEvent({ type: "note", text: `declined (permission ${permissionName}, ${asked ? "the user said no" : "nobody to ask"}): ${what}` });
+      }
+      // "No, and stop": the turn counts as stopped from here, so nothing more is sent to agy
+      // after the refusal; the cancel itself goes out once the refusal has.
+      if (stop) {
+        cancelled = true;
+        setTimeout(cancel, 0);
       }
       if (!option) return { outcome: { outcome: "cancelled" } };
       return { outcome: { outcome: "selected", optionId: option.optionId } };
@@ -378,14 +449,23 @@ export const agyBackend = {
         clientInfo: CLIENT_INFO
       });
 
-      let opened;
+      let opened = null;
+      const resumeNotes = [];
       if (resumeSessionId) {
         // Stays set until the history has gone quiet, which is checked just before the prompt.
         replaying = true;
-        opened = await client.request("session/load", { sessionId: resumeSessionId, cwd, mcpServers: [] });
-        lastActivityAt = Date.now();
-        sessionId = opened?.sessionId ?? resumeSessionId;
-      } else {
+        try {
+          opened = await client.request("session/load", { sessionId: resumeSessionId, cwd, mcpServers: [] });
+          lastActivityAt = Date.now();
+          sessionId = opened?.sessionId ?? resumeSessionId;
+        } catch (error) {
+          // A conversation whose session is gone goes on in a new one rather than failing
+          // every turn from here on.
+          replaying = false;
+          resumeNotes.push(`the earlier agy session could not be resumed (${error?.message ?? error}), so this turn started a new one, which knows nothing of the earlier conversation`);
+        }
+      }
+      if (!opened) {
         opened = await client.request("session/new", { cwd, mcpServers: [] });
         sessionId = opened.sessionId;
       }
@@ -454,7 +534,7 @@ export const agyBackend = {
           const open = openTools();
           if (open.length) {
             wakeMs = BACKGROUND_WAKE_MS;
-            const stopped = (why) => ({ fatal: false, message: `${why}, so the job stopped waiting: ${named(open)}` });
+            const stopped = (why) => ({ fatal: false, message: `${why}, so the turn stopped waiting: ${named(open)}` });
             if (quietMs >= silenceMs) return stopped(`agy left a command running and gave no sign of life for ${Math.round(silenceMs / 1000)}s`);
             if (now - startedAt >= limitMs) return stopped(`agy was still running a command ${Math.round(limitMs / 1000)}s after its turn ended`);
             continue;
@@ -470,7 +550,7 @@ export const agyBackend = {
       };
       let background = null;
 
-      // agy reports token counts per message, so a job that sends several adds them up.
+      // agy reports token counts per message, so a turn that sends several adds them up.
       // What it spends on steps it takes after ending its turn is not in any of them.
       let usage = null;
       // agy reports token counts for every turn in which the model ran. A turn that
@@ -502,10 +582,20 @@ export const agyBackend = {
       let result = await send(prompt);
       // Whatever came in around a prompt that was dropped is history, not an answer.
       const promptDropped = dropped(result);
-      for (let nudges = 0; nudges < MAX_NUDGES && unanswered.length && !cancelled && !background && result?.stopReason === "end_turn"; nudges += 1) {
-        onEvent({ type: "note", text: "agy stopped at a declined request without answering; asking it to finish without" });
+      for (
+        let nudges = 0;
+        nudges < MAX_NUDGES + 1 && (userWords.length || unanswered.length) && !cancelled && !background && result?.stopReason === "end_turn";
+        nudges += 1
+      ) {
         messageBroken = true;
-        result = await send(nudgeAfterDeclines(unanswered.splice(0)));
+        if (userWords.length) {
+          onEvent({ type: "note", text: "passing the user's words on to agy" });
+          unanswered.length = 0;
+          result = await send(relayWords(userWords.splice(0)));
+        } else {
+          onEvent({ type: "note", text: "agy stopped at a declined request without answering; asking it to finish without" });
+          result = await send(nudgeAfterDeclines(unanswered.splice(0)));
+        }
       }
 
       const stop = result?.stopReason;
@@ -531,7 +621,7 @@ export const agyBackend = {
 
       // A command that outlives the turn is worth a word to whoever reads the result,
       // however the turn ended: it is still running on this machine.
-      const notes = [];
+      const notes = [...resumeNotes];
       if (background && background.message !== error) notes.push(background.message);
       const daemons = actions.filter((action) => stillOpen(action) && action.daemon);
       if (daemons.length) notes.push(`agy left a command running, as it meant to: ${named(daemons)}`);

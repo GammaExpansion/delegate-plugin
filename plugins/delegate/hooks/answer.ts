@@ -1,16 +1,16 @@
 // How the plugin answers a model request of a delegate's loop in place of the model.
 //
-// A subagent in Claude Code hands its report to its caller by calling the SubagentHandback
-// tool with { message }; the call ends its run. A build or a setting without that tool
-// takes the subagent's last words as its report instead. The plugin cannot tell
-// beforehand which it is, so it tries the tool first, and if the call comes back as an
-// error, it ends the turn with the report as its words.
+// A subagent hands its report to its caller in one of two ways. Where Claude Code offers it
+// the SubagentHandback tool (in auto mode), by calling that tool with { message }, which
+// ends its run; elsewhere its last words are its report. register.tsx picks the way for
+// each run; should a hand-back call come back as an error all the same, the step after it
+// says the report as words.
 
 import type { EngineInterface, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 type Step = AsyncGenerator<TurnStepChunk, TurnStepResult>
 
-export const HANDBACK = 'SubagentHandback'
+const HANDBACK = 'SubagentHandback'
 
 function newToolUseId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(12))

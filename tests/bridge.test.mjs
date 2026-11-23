@@ -1,4 +1,4 @@
-// The bridge of the mod version (plugins/delegate-mod/scripts/bridge.mjs) against the
+// The bridge (plugins/delegate/scripts/bridge.mjs) against the
 // stand-ins for `codex app-server` and `agy acp`: one turn per process, events as JSON
 // lines, and answers and cancels through its control directory.
 // Run from the repository root with: node --test
@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { prependPath, writeFakeBin } from "./fixtures/fake-bin.mjs";
 
-const BRIDGE = fileURLToPath(new URL("../plugins/delegate-mod/scripts/bridge.mjs", import.meta.url));
+const BRIDGE = fileURLToPath(new URL("../plugins/delegate/scripts/bridge.mjs", import.meta.url));
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "delegate-bridge-test-")));
 writeFakeBin(scratch, "codex", fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url)));
 writeFakeBin(scratch, "agy", fileURLToPath(new URL("./fixtures/fake-agy.mjs", import.meta.url)));
@@ -163,11 +163,13 @@ test("agy: an allowed request runs, and the answer comes after it", async () => 
     }
   );
   assert.deepEqual(asked.map(({ kind, title }) => ({ kind, title })), [{ kind: "execute", title: "npm test" }]);
-  // Codex's words for agy's own options; "don't ask again" only where agy offers it.
-  assert.deepEqual(
-    asked[0].choices.map(({ id, label, optionId }) => `${id}=${label}=${optionId}`),
-    ["decline=No, continue without it=no", "accept=Yes, just this once=yes", "cancel=No, and stop Antigravity=no"]
-  );
+  // Codex's words for agy's own options; "don't ask again" only where agy offers it. That
+  // "accept" reaches agy as its own allow_once shows in the answer below.
+  assert.deepEqual(asked[0].choices, [
+    { id: "decline", label: "No, continue without it", allow: false },
+    { id: "accept", label: "Yes, just this once", allow: true },
+    { id: "cancel", label: "No, and stop Antigravity", allow: false, stop: true }
+  ]);
   assert.equal(result.result.status, "completed");
   assert.equal(result.result.text, "Tests passed: 40/40");
   assert.match(result.report, /^\[delegate\] Gemini Agent \(fake-gemini\) · completed/);

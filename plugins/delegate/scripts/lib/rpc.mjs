@@ -7,9 +7,9 @@ import readline from "node:readline";
 
 import { stripAnsi } from "./text.mjs";
 
-export const METHOD_NOT_FOUND = -32601;
+const METHOD_NOT_FOUND = -32601;
 
-export class RpcError extends Error {
+class RpcError extends Error {
   constructor(message, { code } = {}) {
     super(message);
     this.name = "RpcError";
@@ -127,7 +127,7 @@ export class StdioRpcClient {
     try {
       fs.appendFileSync(this.traceFile, `${JSON.stringify({ at: new Date().toISOString(), direction, message })}\n`, { mode: 0o600 });
     } catch {
-      // A trace that cannot be written must not stop the job.
+      // A trace that cannot be written must not stop the turn.
     }
   }
 

@@ -1,0 +1,11 @@
+{
+  "name": "delegate",
+  "version": "1.0.0-alpha.1",
+  "description": "Hand tasks to Codex or Antigravity as Claude Code subagents, with the conversation's own permissions.",
+  "author": {
+    "name": "GammaExpansion",
+    "url": "https://github.com/GammaExpansion"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

@@ -13,6 +13,8 @@
 //                answer and ends its turn; the command never ends
 //   declined     agy asks to run a command, never reports the call as ended, and ends
 //                its turn without a word; told that nobody can approve, it answers
+//   ask          agy asks to run a command; allowed, it runs it and answers, and refused,
+//                it behaves as in "declined"
 //
 // A resumed session (`session/load`) replays its history as updates. A real agy answers
 // the load while a long history is still on its way, which these two play out:
@@ -78,7 +80,7 @@ async function playTurn(id) {
     tool("in_progress", true, { title: "npm run dev", rawInput: { CommandLine: "npm run dev", IsDaemon: true, WaitMsBeforeAsync: 500 } });
     return answer(id, "The server is up.");
   }
-  if (scenario === "declined") {
+  if (scenario === "declined" || scenario === "ask") {
     if (prompts > 1) {
       return answer(id, "I could not run the tests.");
     }
@@ -128,8 +130,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.id === undefined) return;
   // A message with an id and no method is the client's reply to a request of ours.
   if (!message.method) {
+    if (message.id !== PERMISSION_ID) return;
+    if (scenario === "ask" && message.result?.outcome?.optionId === "yes") {
+      tool("completed");
+      return answer(firstPromptId, "Tests passed: 40/40");
+    }
     // The call is left as it was, with no word on how it ended, and the turn just stops.
-    if (message.id === PERMISSION_ID) endTurn(firstPromptId);
+    endTurn(firstPromptId);
     return;
   }
   switch (message.method) {

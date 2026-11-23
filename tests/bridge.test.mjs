@@ -79,7 +79,7 @@ test("a request for approval is put to the caller with Codex's own answers, and 
     [
       "decline=No, continue without it",
       "accept=Yes, just this once",
-      "acceptForSession=Yes, and don't ask again for this command until Codex finishes this task",
+      "acceptForSession=Yes, and don't ask again in this session",
       "cancel=No, and stop Codex"
     ]
   );

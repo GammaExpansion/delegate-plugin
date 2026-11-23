@@ -72,8 +72,23 @@ async function saveConversation($: EngineInterface, agentId: string, conversatio
   for (const { key } of dated.slice(0, dated.length - CONVERSATIONS_KEPT)) await $.store.delete(key)
 }
 
-/** Puts a delegate's request to the user, in the engine's own question dialog. */
-async function askUser($: EngineInterface, backend: Backend, request: ApprovalRequest, show: (line: string) => void): Promise<boolean> {
+const ALLOW = 'Allow'
+const DENY = 'Deny'
+
+/**
+ * Puts a delegate's request to the user, in the engine's own question dialog, and resolves
+ * true only when they pick Allow. The dialog also takes free text. An answer that is
+ * neither option is put back to the user once, with their words quoted; if the second
+ * answer is not an option either, the request is declined. Every answer that declined the
+ * request without a plain Deny is noted, for the report.
+ */
+async function askUser(
+  $: EngineInterface,
+  backend: Backend,
+  request: ApprovalRequest,
+  show: (line: string) => void,
+  note: (line: string) => void,
+): Promise<boolean> {
   const what =
     request.kind === 'command'
       ? `run \`${oneLine(request.title, 300)}\`${request.cwd ? ` in ${request.cwd}` : ''}`
@@ -81,18 +96,37 @@ async function askUser($: EngineInterface, backend: Backend, request: ApprovalRe
         ? `edit ${oneLine(request.title, 300)}`
         : `do this (${request.kind}): ${oneLine(request.title, 300)}`
   const why = request.reason ? ` (${oneLine(request.reason, 200)})` : ''
-  show(`waiting for you: ${oneLine(what, 100)}`)
-  try {
-    const picked = await $.ui.ask(`${AGENT_NAME[backend]} wants to ${what}${why}. Allow it?`, {
+  const short = oneLine(what, 100)
+  const ask = (question: string) =>
+    $.ui.ask(question, {
       header: PRODUCT[backend],
       // Deny first, so that an answer the user did not pick themselves never allows.
-      options: ['Deny', 'Allow'],
+      options: [DENY, ALLOW],
     })
-    return picked === 'Allow'
+  show(`waiting for you: ${short}`)
+  try {
+    let answer = await ask(`${AGENT_NAME[backend]} wants to ${what}${why}. Allow it?`)
+    if (answer !== ALLOW && answer !== DENY) {
+      const said = oneLine(answer, 120)
+      answer = await ask(`You answered "${said}", which is neither Allow nor Deny. ${AGENT_NAME[backend]} still wants to ${what}. Allow it?`)
+      if (answer !== ALLOW && answer !== DENY) {
+        note(`asked whether ${AGENT_NAME[backend]} may ${short}, the user answered "${said}" and then "${oneLine(answer, 120)}", neither Allow nor Deny, so it was declined.`)
+        return false
+      }
+    }
+    return answer === ALLOW
   } catch {
     // Dismissed, or nobody to ask (claude -p).
+    note(`asked whether ${AGENT_NAME[backend]} may ${short}, the question was closed without an answer, so it was declined.`)
     return false
   }
+}
+
+/** The report with lines added under its headline. */
+function withNotes(report: string, notes: string[]): string {
+  if (notes.length === 0) return report
+  const [headline = '', ...rest] = report.split('\n')
+  return [headline, ...notes.map(line => `note: ${line}`), ...rest].join('\n')
 }
 
 /** Runs one turn of a delegate on its backend and returns the report, or null if it was stopped. */
@@ -116,6 +150,7 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
     $.state.set({ plugin: 'delegate', key: 'progress', id: spawn.rowId }, value).catch(() => {})
   }
   show('running', 'starting')
+  const notes: string[] = []
 
   const outcome = await runTurn(
     $,
@@ -141,7 +176,9 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
       },
       onActivity: line => show('running', line),
       onApproval: request =>
-        grant.approvals === 'ask' ? askUser($, backend, request, line => show('running', line)) : Promise.resolve(false),
+        grant.approvals === 'ask'
+          ? askUser($, backend, request, line => show('running', line), line => notes.push(line))
+          : Promise.resolve(false),
     },
   )
 
@@ -151,12 +188,10 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
   }
   show(outcome.status ?? 'failed', outcome.error === null ? (outcome.status ?? 'done') : oneLine(outcome.error, 100))
 
-  let report = outcome.report ?? `[delegate] ${label} · failed\nerror: ${outcome.error ?? 'unknown'}`
   if (leading.setAside.length > 0) {
-    const [headline = '', ...rest] = report.split('\n')
-    const note = `note: ${leading.setAside.join(', ')} was set aside. What a delegate may do follows this conversation's permission mode (${grant.mode}), which gave it ${grant.permission}.`
-    report = [headline, note, ...rest].join('\n')
+    notes.unshift(`${leading.setAside.join(', ')} was set aside. What a delegate may do follows this conversation's permission mode (${grant.mode}), which gave it ${grant.permission}.`)
   }
+  const report = withNotes(outcome.report ?? `[delegate] ${label} · failed\nerror: ${outcome.error ?? 'unknown'}`, notes)
   return report
 }
 

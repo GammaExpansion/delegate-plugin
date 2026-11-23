@@ -1,5 +1,6 @@
 // Backend registry. To add another agent CLI, implement the same four methods
-// (`check`, `listModels`, `settingsFor` and `run`) in a new file and register it here. A
+// (`check`, which may be async, `listModels`, `settingsFor` and `run`) in a new file and
+// register it here. A
 // backend also has a `name` (what --backend takes), a `label` (the product, as in
 // "Codex"), an `agentName` (how the agent is shown to the user while it works, as in
 // "Codex Agent"), and its own permission options: `permissions`, keyed by the names

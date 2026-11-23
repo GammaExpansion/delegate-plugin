@@ -184,12 +184,14 @@ async function cmdModels(argv) {
   return entries.some((entry) => entry.list) ? 0 : 1;
 }
 
-function cmdSetup(argv) {
+async function cmdSetup(argv) {
   const { options } = parseArgs(argv, { booleans: ["json"] });
   const [major, minor] = process.versions.node.split(".").map(Number);
   const report = {
     node: { version: process.versions.node, ok: major > 18 || (major === 18 && minor >= 18) },
-    backends: Object.values(BACKENDS).map((backend) => ({ name: backend.name, label: backend.label, ...backend.check() }))
+    backends: await Promise.all(
+      Object.values(BACKENDS).map(async (backend) => ({ name: backend.name, label: backend.label, ...(await backend.check()) }))
+    )
   };
   console.log(options.json ? JSON.stringify(report, null, 2) : renderSetup(report));
   return 0;

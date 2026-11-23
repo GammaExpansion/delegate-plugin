@@ -85,7 +85,8 @@ async function askUser($: EngineInterface, backend: Backend, request: ApprovalRe
   try {
     const picked = await $.ui.ask(`${AGENT_NAME[backend]} wants to ${what}${why}. Allow it?`, {
       header: PRODUCT[backend],
-      options: ['Allow', 'Deny'],
+      // Deny first, so that an answer the user did not pick themselves never allows.
+      options: ['Deny', 'Allow'],
     })
     return picked === 'Allow'
   } catch {

@@ -167,7 +167,9 @@ export function renderSetup(report) {
       ? "not installed"
       : backend.auth === "ok"
         ? "ready"
-        : backend.auth === "missing"
+        : backend.auth === "provider"
+          ? "ready (own model provider, no login needed)"
+          : backend.auth === "missing"
           ? "installed, not logged in"
           : "installed, login not checked";
     lines.push(`${backend.name}: ${state}${backend.version ? ` · ${backend.version}` : ""}`);

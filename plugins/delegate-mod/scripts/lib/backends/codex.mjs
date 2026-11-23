@@ -120,6 +120,28 @@ function approvalRequest(method, params, item) {
   return { kind: "approval", title: params?.reason ?? method, cwd: null, reason: null };
 }
 
+/**
+ * Whether Codex needs an OpenAI login for the model provider it is set up with, as its
+ * app-server tells it; null when that could not be learned. Nothing is read from the
+ * user's Codex config here: Codex reads it.
+ */
+async function needsOpenaiLogin() {
+  const client = new StdioRpcClient({ command: "codex", args: ["app-server"], cwd: process.cwd() }).start();
+  try {
+    const asked = (async () => {
+      await handshake(client);
+      return client.request("getAuthStatus", { includeToken: false, refreshToken: false });
+    })();
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 15_000).unref());
+    const status = await Promise.race([asked, timeout, client.failure]);
+    return typeof status?.requiresOpenaiAuth === "boolean" ? status.requiresOpenaiAuth : null;
+  } catch {
+    return null;
+  } finally {
+    await client.close();
+  }
+}
+
 export const codexBackend = {
   name: "codex",
   label: "Codex",
@@ -128,7 +150,7 @@ export const codexBackend = {
   defaultPermission: "read-only",
   settingsFor,
 
-  check() {
+  async check() {
     const info = { installed: false, version: null, auth: "unknown", hint: null };
     try {
       info.version = execCommandSync("codex", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
@@ -141,7 +163,15 @@ export const codexBackend = {
       // Exit code only: the output can include part of an API key, so it is not echoed.
       execCommandSync("codex", ["login", "status"], { stdio: "ignore" });
       info.auth = "ok";
+      return info;
     } catch {
+      // Not signed in to OpenAI. That is fine for a model provider of the user's own (an
+      // API gateway, a local model), and Codex says which it is.
+    }
+    if ((await needsOpenaiLogin()) === false) {
+      info.auth = "provider";
+      info.hint = "Codex uses a model provider of its own, which needs no OpenAI login. Its key is not checked here; the first task shows whether it works.";
+    } else {
       info.auth = "missing";
       info.hint = "Run `codex login` in a terminal.";
     }

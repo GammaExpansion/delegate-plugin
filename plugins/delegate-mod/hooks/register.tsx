@@ -281,8 +281,9 @@ export const register: Register = (on, options) => {
         properties: { backend: { type: 'string', enum: ['codex', 'agy'], description: 'One backend; both when left out.' } },
       },
     })
-    await $.command.register({ name: 'setup', description: 'Check that Node and the Codex and Antigravity CLIs are ready for delegate' })
-    await $.command.register({ name: 'models', description: 'List the models Codex and Antigravity accept', argumentHint: '[codex|agy]' })
+    // A plugin's own command is run as /<name>, with no plugin prefix, so the names carry it.
+    await $.command.register({ name: 'delegate-setup', description: 'Check that Node and the Codex and Antigravity CLIs are ready for delegate' })
+    await $.command.register({ name: 'delegate-models', description: 'List the models Codex and Antigravity accept', argumentHint: '[codex|agy]' })
     return next(e)
   })
 
@@ -337,9 +338,9 @@ export const register: Register = (on, options) => {
     return { result: await bridgeText($, ['models', ...backendArg(input.backend)]) }
   })
 
-  on('command.run', { command: 'setup' }, async $ => ({ text: await bridgeText($, ['setup']), isTextDisplayOnly: true }))
+  on('command.run', { command: 'delegate-setup' }, async $ => ({ text: await bridgeText($, ['setup']), isTextDisplayOnly: true }))
 
-  on('command.run', { command: 'models' }, async ($, e) => ({
+  on('command.run', { command: 'delegate-models' }, async ($, e) => ({
     text: await bridgeText($, ['models', ...backendArg(e.args)]),
     isTextDisplayOnly: true,
   }))

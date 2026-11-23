@@ -69,4 +69,4 @@ A report is a headline (agent, model, outcome, time, permission option), then an
 - After a review, stop and let the user choose what to fix.
 - If the run failed or was stopped, say so. Do not do the task yourself and present it as the delegate's.
 - A `note:` that a command was left running means it is still running on this machine. Tell the user.
-- If a backend is missing or not logged in, point the user to `/delegate:setup`.
+- If a backend is missing or not logged in, point the user to `/delegate-setup`.

@@ -13,14 +13,21 @@
 // `answer-<id>.json` there to answer a request for approval, and `cancel` to stop the
 // turn. The bridge looks for them a few times a second.
 //
+// The directory is in the system temp directory, which a backend's sandbox can write to,
+// so a delegate could write an answer of its own there. Every file the bridge reads must
+// carry the turn's token, which goes out only on stdout, to the module; a file without
+// it, or one not yet complete, is passed over.
+//
 // Events, one JSON object per line:
-//   { type: "ready", controlDir }
+//   { type: "ready", controlDir, token }
 //   { type: "event", event }                 a BackendEvent (see lib/backends/index.mjs)
 //   { type: "approval", id, request }        an ApprovalRequest; answer with answer-<id>.json
-//                                            holding { "choice": "<id of one of request.choices>" },
-//                                            or { "text": "..." }: the user's own words, which
-//                                            decline the request and are passed on to the agent
+//                                            holding { "token", "choice": "<id of one of request.choices>" },
+//                                            or { "token", "text": "..." }: the user's own words,
+//                                            which decline the request and are passed on
 //   { type: "result", result, report }       the RunResult, and the report for Claude
+// and `cancel` holds { "token" }.
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -43,12 +50,14 @@ function readStdin() {
   });
 }
 
-/** Where DELEGATE_TRACE=1 has a turn write every JSON-RPC message, or null. */
+/**
+ * Where DELEGATE_TRACE=1 has a turn write every JSON-RPC message, or null: a new directory
+ * of its own (mkdtemp, mode 0700), so that nobody else can have made it or put a link there.
+ */
 function traceFileFor(backendName) {
   if (process.env.DELEGATE_TRACE !== "1") return null;
-  const dir = path.join(os.tmpdir(), "delegate-plugin", "traces");
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${backendName}.trace.jsonl`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-trace-"));
+  return path.join(dir, `${backendName}.trace.jsonl`);
 }
 
 /**
@@ -70,6 +79,7 @@ async function cmdRun() {
   const request = JSON.parse(await readStdin());
   const backend = getBackend(request.backend);
   const controlDir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-ctl-"));
+  const token = randomBytes(24).toString("hex");
   const controller = new AbortController();
   const pending = new Map();
   let nextId = 1;
@@ -80,24 +90,24 @@ async function cmdRun() {
   };
   controller.signal.addEventListener("abort", settleAll, { once: true });
 
+  /** A control file's content if it is complete and carries the turn's token, else null. */
+  const readSigned = (name) => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(controlDir, name), "utf8"));
+      return parsed && typeof parsed === "object" && parsed.token === token ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
   const poll = setInterval(() => {
-    if (!controller.signal.aborted && fs.existsSync(path.join(controlDir, "cancel"))) controller.abort();
+    if (!controller.signal.aborted && readSigned("cancel")) controller.abort();
     for (const [id, resolve] of pending) {
-      let text;
-      try {
-        text = fs.readFileSync(path.join(controlDir, `answer-${id}.json`), "utf8");
-      } catch {
-        continue;
-      }
+      const signed = readSigned(`answer-${id}.json`);
+      if (!signed) continue;
       let answer = null;
-      try {
-        const parsed = JSON.parse(text);
-        if (typeof parsed.choice === "string") answer = parsed.choice;
-        else if (typeof parsed.text === "string" && parsed.text.trim()) answer = { text: parsed.text };
-        else if (typeof parsed.allow === "boolean") answer = parsed.allow;
-      } catch {
-        // Unreadable is no.
-      }
+      if (typeof signed.choice === "string") answer = signed.choice;
+      else if (typeof signed.text === "string" && signed.text.trim()) answer = { text: signed.text };
       pending.delete(id);
       resolve(answer);
     }
@@ -109,7 +119,7 @@ async function cmdRun() {
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
-  emit({ type: "ready", controlDir });
+  emit({ type: "ready", controlDir, token });
 
   const startedAt = Date.now();
   let shown = { model: request.model ?? null, effort: null };
@@ -128,6 +138,7 @@ async function cmdRun() {
           })
       : undefined;
 
+  const traceFile = traceFileFor(backend.name);
   let result;
   try {
     result = await backend.run({
@@ -139,7 +150,7 @@ async function cmdRun() {
       effort: request.effort || undefined,
       resumeSessionId: request.resumeSessionId || undefined,
       signal: controller.signal,
-      traceFile: traceFileFor(backend.name),
+      traceFile,
       onEvent,
       onApproval
     });
@@ -159,6 +170,7 @@ async function cmdRun() {
     fs.rmSync(controlDir, { recursive: true, force: true });
   }
 
+  if (traceFile) result.notes = [...(result.notes ?? []), `the JSON-RPC trace of this turn is in ${traceFile}`];
   const report = renderReport({
     backend,
     permission: request.permission,

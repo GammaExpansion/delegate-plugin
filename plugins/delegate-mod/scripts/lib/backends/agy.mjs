@@ -175,7 +175,7 @@ const KIND_ORDER = ["reject_once", "reject_always", "allow_once", "allow_always"
 const kindRank = (kind) => (KIND_ORDER.includes(kind) ? KIND_ORDER.indexOf(kind) : String(kind).startsWith("reject") ? 1.5 : 3.5);
 const FILE_KINDS = new Set(["edit", "delete", "move"]);
 
-/** @returns {{ id: string, label: string, allow: boolean, optionId: string, stop?: boolean }[]} */
+/** @returns {{ id: string, label: string, allow: boolean, optionId: string | null, stop?: boolean }[]} */
 function choicesOf(options, kind) {
   const usable = options.filter((option) => option?.optionId);
   const once = usable.find((option) => option.kind === "allow_once");
@@ -190,10 +190,12 @@ function choicesOf(options, kind) {
       { id: "cancel", label: "No, and stop Antigravity", allow: false, optionId: reject.optionId, stop: true }
     ];
   }
-  return [...usable]
+  const own = [...usable]
     .sort((a, b) => kindRank(a.kind) - kindRank(b.kind))
-    .slice(0, 4)
     .map((option) => ({ id: option.optionId, label: option.name || option.kind, allow: String(option.kind).startsWith("allow"), optionId: option.optionId }));
+  // Without a refusal of agy's own, one is added in front: it answers "cancelled".
+  if (!own.some((choice) => !choice.allow)) own.unshift({ id: "decline", label: "No, continue without it", allow: false, optionId: null });
+  return own.slice(0, 4);
 }
 
 /**
@@ -347,6 +349,7 @@ export const agyBackend = {
             status: update.status ?? previous.status
           };
           if (update.rawInput?.IsDaemon === true) action.daemon = true;
+          if (typeof update.rawInput?.CommandLine === "string") action.command = update.rawInput.CommandLine;
           tools.set(update.toolCallId, action);
           if (!known) {
             flush("thinking");
@@ -398,7 +401,14 @@ export const agyBackend = {
       const choices = choicesOf(params?.options ?? [], call.kind ?? entry.kind);
       if (!allow && onApproval && !signal?.aborted && choices.some((choice) => choice.allow)) {
         asked = true;
-        const answer = await onApproval({ kind: entry.kind ?? "tool", title: entry.title, cwd: null, reason: paths.length ? paths.join(", ") : null, choices });
+        // The command line itself where agy gives it, rather than its title for the call.
+        const command = typeof call.rawInput?.CommandLine === "string" ? call.rawInput.CommandLine : tools.get(call.toolCallId)?.command;
+        const answer = await onApproval({ kind: entry.kind ?? "tool", title: command ?? entry.title, cwd: null, reason: paths.length ? paths.join(", ") : null, choices });
+        if (signal?.aborted) {
+          // The turn was stopped while the user was asked: ACP wants "cancelled" then.
+          tools.set(call.toolCallId, { ...(tools.get(call.toolCallId) ?? entry), permission: "denied" });
+          return { outcome: { outcome: "cancelled" } };
+        }
         const words = answer && typeof answer === "object" && typeof answer.text === "string" ? answer.text.trim() : "";
         if (words) userWords.push({ what: `${entry.kind ?? "tool"} ${oneLine(entry.title, 160)}`, words });
         const picked =
@@ -434,14 +444,23 @@ export const agyBackend = {
         clientInfo: CLIENT_INFO
       });
 
-      let opened;
+      let opened = null;
+      const resumeNotes = [];
       if (resumeSessionId) {
         // Stays set until the history has gone quiet, which is checked just before the prompt.
         replaying = true;
-        opened = await client.request("session/load", { sessionId: resumeSessionId, cwd, mcpServers: [] });
-        lastActivityAt = Date.now();
-        sessionId = opened?.sessionId ?? resumeSessionId;
-      } else {
+        try {
+          opened = await client.request("session/load", { sessionId: resumeSessionId, cwd, mcpServers: [] });
+          lastActivityAt = Date.now();
+          sessionId = opened?.sessionId ?? resumeSessionId;
+        } catch (error) {
+          // A conversation whose session is gone goes on in a new one rather than failing
+          // every turn from here on.
+          replaying = false;
+          resumeNotes.push(`the earlier agy session could not be resumed (${error?.message ?? error}), so this turn started a new one, which knows nothing of the earlier conversation`);
+        }
+      }
+      if (!opened) {
         opened = await client.request("session/new", { cwd, mcpServers: [] });
         sessionId = opened.sessionId;
       }
@@ -597,7 +616,7 @@ export const agyBackend = {
 
       // A command that outlives the turn is worth a word to whoever reads the result,
       // however the turn ended: it is still running on this machine.
-      const notes = [];
+      const notes = [...resumeNotes];
       if (background && background.message !== error) notes.push(background.message);
       const daemons = actions.filter((action) => stillOpen(action) && action.daemon);
       if (daemons.length) notes.push(`agy left a command running, as it meant to: ${named(daemons)}`);

@@ -30,6 +30,11 @@ test('the options come off the first line, and the task is left as it was', asyn
   const other = takeOptions('--verbose please explain math.js')
   expect(other.model).toBe(null)
   expect(other.task).toBe('--verbose please explain math.js')
+
+  // Only the first line is read: an option on a later line is part of the task.
+  const later = takeOptions('Fix the flag parsing\n--model is ignored here')
+  expect(later.model).toBe(null)
+  expect(later.task).toBe('Fix the flag parsing\n--model is ignored here')
 })
 
 test('a task that asks for more than the mode gives is told apart from one that asks for less', async () => {

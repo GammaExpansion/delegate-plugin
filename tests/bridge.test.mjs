@@ -30,13 +30,14 @@ function runTurn(request, { env = {}, onEvent = () => {} } = {}) {
   child.stdin.end(JSON.stringify({ cwd: scratch, prompt: "do the thing", approvals: "decline", ...request }));
   const events = [];
   let controlDir = null;
+  let token = null;
   let stderr = "";
   child.stderr.on("data", (chunk) => (stderr += chunk));
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
     const event = JSON.parse(line);
     events.push(event);
-    if (event.type === "ready") controlDir = event.controlDir;
-    onEvent(event, { controlDir, child });
+    if (event.type === "ready") ({ controlDir, token } = event);
+    onEvent(event, { controlDir, token, child });
   });
   return new Promise((resolve) => {
     child.on("exit", (code) => {
@@ -46,8 +47,9 @@ function runTurn(request, { env = {}, onEvent = () => {} } = {}) {
   });
 }
 
-/** Answers a request with one of the agent's own answers (`{ choice }`) or with words (`{ text }`). */
-const answer = (controlDir, id, reply) => fs.writeFileSync(path.join(controlDir, `answer-${id}.json`), JSON.stringify(reply));
+/** Answers a request with one of the agent's own answers (`{ choice }`) or with words (`{ text }`), signed with the turn's token. */
+const answer = (ctx, id, reply) => fs.writeFileSync(path.join(ctx.controlDir, `answer-${id}.json`), JSON.stringify({ ...reply, token: ctx.token }));
+const cancel = (ctx) => fs.writeFileSync(path.join(ctx.controlDir, "cancel"), JSON.stringify({ token: ctx.token }));
 
 test("a turn ends with a result and a report, and the control directory is gone", async () => {
   const { code, result, controlDir, events } = await runTurn({ backend: "codex", permission: "read-only" }, { env: { FAKE_CODEX_SCENARIO: "normal" } });
@@ -65,10 +67,10 @@ test("a request for approval is put to the caller with Codex's own answers, and 
     { backend: "codex", permission: "read-only", approvals: "ask" },
     {
       env: { FAKE_CODEX_SCENARIO: "approval" },
-      onEvent: (event, { controlDir }) => {
+      onEvent: (event, ctx) => {
         if (event.type !== "approval") return;
         asked.push(event.request);
-        answer(controlDir, event.id, { choice: "accept" });
+        answer(ctx, event.id, { choice: "accept" });
       }
     }
   );
@@ -92,7 +94,7 @@ test("words in place of an answer decline the step and reach Codex during the tu
     { backend: "codex", permission: "read-only", approvals: "ask" },
     {
       env: { FAKE_CODEX_SCENARIO: "approval" },
-      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { text: "write it under /tmp instead" })
+      onEvent: (event, ctx) => event.type === "approval" && answer(ctx, event.id, { text: "write it under /tmp instead" })
     }
   );
   assert.equal(
@@ -106,7 +108,7 @@ test("a no declines the step, and the report says the user was asked", async () 
     { backend: "codex", permission: "read-only", approvals: "ask" },
     {
       env: { FAKE_CODEX_SCENARIO: "approval" },
-      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { choice: "decline" })
+      onEvent: (event, ctx) => event.type === "approval" && answer(ctx, event.id, { choice: "decline" })
     }
   );
   assert.equal(result.result.text, "the answer was decline");
@@ -128,7 +130,7 @@ test("a cancel through the control directory stops the turn while it waits for a
     { backend: "codex", permission: "read-only", approvals: "ask" },
     {
       env: { FAKE_CODEX_SCENARIO: "approval" },
-      onEvent: (event, { controlDir }) => event.type === "approval" && fs.writeFileSync(path.join(controlDir, "cancel"), "")
+      onEvent: (event, ctx) => event.type === "approval" && cancel(ctx)
     }
   );
   assert.equal(result.result.status, "cancelled");
@@ -153,10 +155,10 @@ test("agy: an allowed request runs, and the answer comes after it", async () => 
     { backend: "agy", permission: "default", approvals: "ask" },
     {
       env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
-      onEvent: (event, { controlDir }) => {
+      onEvent: (event, ctx) => {
         if (event.type !== "approval") return;
         asked.push(event.request);
-        answer(controlDir, event.id, { choice: "accept" });
+        answer(ctx, event.id, { choice: "accept" });
       }
     }
   );
@@ -176,7 +178,7 @@ test("agy: a refused request is declined, and agy is asked to finish without it"
     { backend: "agy", permission: "default", approvals: "ask" },
     {
       env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
-      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { choice: "decline" })
+      onEvent: (event, ctx) => event.type === "approval" && answer(ctx, event.id, { choice: "decline" })
     }
   );
   assert.equal(result.result.text, "I could not run the tests.");
@@ -188,7 +190,7 @@ test("agy: \"No, and stop\" refuses the request and ends the turn", async () => 
     { backend: "agy", permission: "default", approvals: "ask" },
     {
       env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
-      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { choice: "cancel" })
+      onEvent: (event, ctx) => event.type === "approval" && answer(ctx, event.id, { choice: "cancel" })
     }
   );
   assert.equal(result.result.status, "cancelled");
@@ -200,7 +202,7 @@ test("agy: words in place of an answer decline the request and reach agy after t
     { backend: "agy", permission: "default", approvals: "ask" },
     {
       env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
-      onEvent: (event, { controlDir }) => event.type === "approval" && answer(controlDir, event.id, { text: "skip the tests, just read the code" })
+      onEvent: (event, ctx) => event.type === "approval" && answer(ctx, event.id, { text: "skip the tests, just read the code" })
     }
   );
   assert.equal(result.result.text, "Heard: skip the tests, just read the code");
@@ -225,6 +227,110 @@ test("a request the bridge cannot read is reported as an error event", async () 
   const code = await new Promise((resolve) => child.on("exit", resolve));
   assert.equal(code, 2);
   assert.equal(JSON.parse(out.trim()).type, "error");
+});
+
+test("an answer without the turn's token is passed over, even one written before the question", async () => {
+  const { result } = await runTurn(
+    { backend: "codex", permission: "read-only", approvals: "ask" },
+    {
+      env: { FAKE_CODEX_SCENARIO: "approval" },
+      onEvent: (event, ctx) => {
+        if (event.type === "ready") {
+          // What a delegate's sandboxed command could write there: no token, or a wrong one.
+          for (let id = 1; id <= 3; id += 1) fs.writeFileSync(path.join(ctx.controlDir, `answer-${id}.json`), JSON.stringify({ choice: "acceptForSession" }));
+          fs.writeFileSync(path.join(ctx.controlDir, "cancel"), JSON.stringify({ token: "0".repeat(48) }));
+        }
+        if (event.type === "approval") setTimeout(() => answer(ctx, event.id, { choice: "decline" }), 400);
+      }
+    }
+  );
+  assert.equal(result.result.status, "completed");
+  assert.equal(result.result.text, "the answer was decline");
+});
+
+test("an answer file read before it is complete is read again", async () => {
+  const { result } = await runTurn(
+    { backend: "codex", permission: "read-only", approvals: "ask" },
+    {
+      env: { FAKE_CODEX_SCENARIO: "approval" },
+      onEvent: (event, ctx) => {
+        if (event.type !== "approval") return;
+        fs.writeFileSync(path.join(ctx.controlDir, `answer-${event.id}.json`), "");
+        setTimeout(() => answer(ctx, event.id, { choice: "accept" }), 400);
+      }
+    }
+  );
+  assert.equal(result.result.text, "the answer was accept");
+});
+
+test("Codex's request for more permissions shows what it asks for, and is answered in its own shape", async () => {
+  const asked = [];
+  const allowed = await runTurn(
+    { backend: "codex", permission: "read-only", approvals: "ask" },
+    {
+      env: { FAKE_CODEX_SCENARIO: "permissions" },
+      onEvent: (event, ctx) => {
+        if (event.type !== "approval") return;
+        asked.push(event.request);
+        answer(ctx, event.id, { choice: "accept" });
+      }
+    }
+  );
+  assert.equal(asked[0].kind, "permissions");
+  assert.equal(asked[0].title, "write /dev/bus/usb; network access");
+  assert.deepEqual(asked[0].choices.map(({ id }) => id), ["decline", "accept"]);
+  assert.equal(allowed.result.result.text, 'granted {"permissions":{"fileSystem":{"write":["/dev/bus/usb"]},"network":{"enabled":true}},"scope":"turn"}');
+
+  const refused = await runTurn(
+    { backend: "codex", permission: "read-only", approvals: "ask" },
+    { env: { FAKE_CODEX_SCENARIO: "permissions" }, onEvent: (event, ctx) => event.type === "approval" && answer(ctx, event.id, { choice: "decline" }) }
+  );
+  assert.equal(refused.result.result.text, 'granted {"permissions":{},"scope":"turn"}');
+  assert.match(refused.result.report, /declined \(1\):\n- \[permissions\] write \/dev\/bus\/usb; network access \(declined\)/);
+});
+
+test("Codex: a session that cannot be resumed is replaced by a new one, with a note", async () => {
+  const { result } = await runTurn(
+    { backend: "codex", permission: "read-only", resumeSessionId: "gone-thread" },
+    { env: { FAKE_CODEX_SCENARIO: "normal", FAKE_CODEX_RESUME_FAILS: "1" } }
+  );
+  assert.equal(result.result.status, "completed");
+  assert.equal(result.result.sessionId, "thread-main");
+  assert.match(result.report, /note: the earlier Codex session could not be resumed \(no rollout found for thread\), so this turn started a new one/);
+});
+
+test("agy: a session that cannot be resumed is replaced by a new one, with a note", async () => {
+  const { result } = await runTurn(
+    { backend: "agy", permission: "default", resumeSessionId: "gone-session" },
+    { env: { FAKE_AGY_SCENARIO: "replay-late", FAKE_AGY_LOAD_FAILS: "1" } }
+  );
+  assert.equal(result.result.status, "completed");
+  assert.match(result.report, /note: the earlier agy session could not be resumed \(session not found\), so this turn started a new one/);
+});
+
+test("agy: with no refusal of its own on offer, one is put first, and answers cancelled", async () => {
+  const asked = [];
+  const { result } = await runTurn(
+    { backend: "agy", permission: "default", approvals: "ask" },
+    {
+      env: { FAKE_AGY_SCENARIO: "ask-always", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
+      onEvent: (event, ctx) => {
+        if (event.type !== "approval") return;
+        asked.push(event.request);
+        answer(ctx, event.id, { choice: "decline" });
+      }
+    }
+  );
+  assert.deepEqual(asked[0].choices.map(({ id, label, allow }) => `${id}=${label}=${allow}`), ["decline=No, continue without it=false", "always=Always allow=true"]);
+  assert.equal(result.result.text, "I could not run the tests.");
+});
+
+test("agy: stopped while the user is asked, the request is answered cancelled and the turn ends", async () => {
+  const { result } = await runTurn(
+    { backend: "agy", permission: "default", approvals: "ask" },
+    { env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" }, onEvent: (event, ctx) => event.type === "approval" && cancel(ctx) }
+  );
+  assert.equal(result.result.status, "cancelled");
 });
 
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));

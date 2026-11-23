@@ -9,25 +9,23 @@
 //
 // What a delegate may do follows the permission mode of the conversation that started or
 // continued it (permissions.ts), read from the spawn on every turn.
+//
+// What must outlive a reload of this module is in $.state: each delegate's latest spawn,
+// each turn taken on, and the progress drawn under the Agent row.
 
 import type { EngineInterface, Register, TurnStepInput } from 'claude-code'
-import type { Progress } from '../types'
+import type { Progress, SpawnRecord, TurnRecord } from '../types'
 import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './agents'
 import { endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
 import { oneLine, runTurn, type ApprovalAnswer, type ApprovalRequest } from './bridge'
 import { takeOptions } from './options'
 import { askedFor, describe, grantFor, type Backend, type Grant } from './permissions'
 
-/** What the latest spawn of a delegate said: the backend, the mode, and the row it came from. */
-type Spawn = { backend: Backend; mode: string | undefined; rowId: string }
-
 /** A delegate conversation, kept across sessions so that a resumed one can go on. */
 type Conversation = { backend: Backend; sessionId: string; model: string | null; effort: string | null; at: number }
 
-const spawns = new Map<string, Spawn>()
+/** Agents found not to be delegates, so that their steps are passed on without a lookup. */
 const notOurs = new Set<string>()
-/** Hand-back calls made, by turn, to check on the step after. */
-const handedBack = new Map<string, { id: string; report: string }>()
 /**
  * Whether a delegate's run was offered the hand-back tool, by agent, where Claude Code asked
  * about it. Outside auto mode the tool is not on a subagent's list at all, and nothing is
@@ -39,19 +37,49 @@ const handBackOffered = new Map<string, boolean>()
 const CONVERSATIONS_KEPT = 200
 const conversationKey = (agentId: string) => `conversation:${agentId}`
 
+/** How much of what a delegate asks to do is shown; anything longer can only be declined. */
+const SHOWN_AT_MOST = 2000
+
 const MODELS_TOOL = [
   'Lists the model ids and reasoning efforts that the delegate:codex (OpenAI Codex) and delegate:agy (Google Antigravity) subagents accept.',
   'Use it before picking a model for a delegate with --model on the first line of its prompt, before guessing an id, and before saying that a model does not exist.',
 ].join(' ')
 
+const failed = (backend: Backend, error: string) => `[delegate] ${AGENT_NAME[backend]} · failed\nerror: ${error}`
+
+async function spawnOf($: EngineInterface, agentId: string): Promise<SpawnRecord | undefined> {
+  return (await $.state.get({ plugin: 'delegate', key: 'spawn', id: agentId })).value
+}
+
+async function turnOf($: EngineInterface, turnId: string): Promise<TurnRecord | undefined> {
+  return (await $.state.get({ plugin: 'delegate', key: 'turn', id: turnId })).value
+}
+
+async function setTurn($: EngineInterface, turnId: string, record: TurnRecord): Promise<void> {
+  await $.state.set({ plugin: 'delegate', key: 'turn', id: turnId }, record)
+}
+
 async function delegateOf($: EngineInterface, agentId: string | undefined): Promise<Backend | undefined> {
   if (agentId === undefined || notOurs.has(agentId)) return undefined
-  const known = spawns.get(agentId)
+  const known = await spawnOf($, agentId)
   if (known !== undefined) return known.backend
   const info = (await $.agent.list()).find(agent => agent.id === agentId)
   const backend = backendOfType(info?.type)
   if (backend === undefined && info !== undefined) notOurs.add(agentId)
   return backend
+}
+
+/**
+ * The delegate's spawn record. Its first step can come before the agent.spawn hook has
+ * written it, so it is waited for a little, and taken as unknown (default mode) after that.
+ */
+async function awaitSpawn($: EngineInterface, agentId: string): Promise<SpawnRecord | undefined> {
+  for (let tries = 0; tries < 20; tries++) {
+    const record = await spawnOf($, agentId)
+    if (record !== undefined) return record
+    await $.clock.sleep(100)
+  }
+  return undefined
 }
 
 function labelOf(backend: Backend, model: string | null, effort: string | null): string {
@@ -79,12 +107,31 @@ async function saveConversation($: EngineInterface, agentId: string, conversatio
   for (const { key } of dated.slice(0, dated.length - CONVERSATIONS_KEPT)) await $.store.delete(key)
 }
 
+/** What a request asks for, in words that say what kind of thing it is. */
+function wantsTo(request: ApprovalRequest, subject: string): string {
+  switch (request.kind) {
+    case 'command':
+      return `run \`${subject}\`${request.cwd ? ` in ${request.cwd}` : ''}`
+    case 'input':
+      return `send input to the running command \`${subject}\``
+    case 'network':
+      return `reach ${subject}`
+    case 'permissions':
+      return `get more permissions: ${subject}`
+    case 'edit':
+      return `edit ${subject}`
+    default:
+      return `do this (${request.kind}): ${subject}`
+  }
+}
+
 /**
  * Puts a delegate's request to the user in the engine's own question dialog, with the
  * agent's own answers to pick from (declining ones first, so that an answer the user did
- * not pick themselves never allows). The dialog also takes free text, which no agent takes
- * as an answer: it declines the request, and the words are passed on to the agent. Words,
- * and a dialog closed without an answer, are noted for the report.
+ * not pick themselves never allows). A request too long to show in full can only be
+ * declined. The dialog also takes free text, which no agent takes as an answer: it declines
+ * the request, and the words are passed on to the agent. Words, and a dialog closed without
+ * an answer, are noted for the report.
  */
 async function askUser(
   $: EngineInterface,
@@ -93,31 +140,34 @@ async function askUser(
   show: (line: string) => void,
   note: (line: string) => void,
 ): Promise<ApprovalAnswer> {
-  const what =
-    request.kind === 'command'
-      ? `run \`${oneLine(request.title, 300)}\`${request.cwd ? ` in ${request.cwd}` : ''}`
-      : request.kind === 'edit'
-        ? `edit ${oneLine(request.title, 300)}`
-        : `do this (${request.kind}): ${oneLine(request.title, 300)}`
-  const why = request.reason ? ` (${oneLine(request.reason, 200)})` : ''
-  const choices = request.choices.slice(0, 4)
-  if (choices.length < 2) return null
+  const cut = request.title.length > SHOWN_AT_MOST
+  const what = wantsTo(request, cut ? `${request.title.slice(0, SHOWN_AT_MOST)}…` : request.title)
+  const short = oneLine(wantsTo(request, request.title), 300)
+  const why = request.reason ? ` (${oneLine(request.reason, 300)})` : ''
+  const choices = request.choices.slice(0, 4).filter(choice => !cut || !choice.allow)
+  if (choices.length < 2) {
+    note(`${AGENT_NAME[backend]} asked to ${short}, which could not be put to the user, so it was declined.`)
+    return null
+  }
+  const ending = cut
+    ? `It is too long to show in full, so it can only be declined.`
+    : `Allow it? Or type what ${PRODUCT[backend]} should do instead.`
   show(`waiting for you: ${oneLine(what, 100)}`)
   try {
-    const answer = await $.ui.ask(
-      `${AGENT_NAME[backend]} wants to ${what}${why}. Allow it? Or type what ${PRODUCT[backend]} should do instead.`,
-      { header: PRODUCT[backend], options: choices.map(choice => choice.label) },
-    )
+    const answer = await $.ui.ask(`${AGENT_NAME[backend]} wants to ${what}${why}. ${ending}`, {
+      header: PRODUCT[backend],
+      options: choices.map(choice => choice.label),
+    })
     const picked = choices.find(choice => choice.label === answer)
     if (picked !== undefined) {
-      if (picked.stop === true) note(`the user did not allow ${AGENT_NAME[backend]} to ${what}, and stopped it.`)
+      if (picked.stop === true) note(`the user did not allow ${AGENT_NAME[backend]} to ${short}, and stopped it.`)
       return { choice: picked.id }
     }
-    note(`the user did not allow ${AGENT_NAME[backend]} to ${what}, and wrote: "${oneLine(answer, 300)}". The words were passed on to ${PRODUCT[backend]}.`)
+    note(`the user did not allow ${AGENT_NAME[backend]} to ${short}, and wrote: "${oneLine(answer, 300)}". The words were passed on to ${PRODUCT[backend]}.`)
     return { text: answer }
   } catch {
     // Dismissed, or nobody to ask (claude -p).
-    note(`asked whether ${AGENT_NAME[backend]} may ${what}, the question was closed without an answer, so it was declined.`)
+    note(`asked whether ${AGENT_NAME[backend]} may ${short}, the question was closed without an answer, so it was declined.`)
     return null
   }
 }
@@ -130,6 +180,7 @@ async function askUser(
 async function confirmWider(
   $: EngineInterface,
   backend: Backend,
+  task: string,
   base: Grant,
   wanted: Grant,
   note: (line: string) => void,
@@ -144,7 +195,7 @@ async function confirmWider(
   const allow = `Allow ${to}`
   try {
     const answer = await $.ui.ask(
-      `This conversation is in ${base.mode} mode, which gives ${AGENT_NAME[backend]} ${from}. The task asks for ${to}. Allow that for this turn?`,
+      `This conversation is in ${base.mode} mode, which gives ${AGENT_NAME[backend]} ${from}. The task "${oneLine(task, 160)}" asks for ${to}. Allow that for this turn?`,
       // Keep first, so that an answer the user did not pick themselves never widens.
       { header: PRODUCT[backend], options: [keep, allow] },
     )
@@ -171,16 +222,21 @@ function withNotes(report: string, notes: string[]): string {
 }
 
 /** Runs one turn of a delegate on its backend and returns the report, or null if it was stopped. */
-async function runDelegate($: EngineInterface, agentId: string, backend: Backend, signal: AbortSignal): Promise<string | null> {
-  const spawn = spawns.get(agentId)
+async function runDelegate(
+  $: EngineInterface,
+  agentId: string,
+  backend: Backend,
+  spawn: SpawnRecord | undefined,
+  signal: AbortSignal,
+): Promise<string | null> {
   const leading = takeOptions(await latestMessage($, agentId))
-  if (leading.task === '') return `[delegate] ${AGENT_NAME[backend]} · failed\nerror: the prompt holds no task.`
+  if (leading.task === '') return failed(backend, 'the prompt holds no task.')
   const notes: string[] = []
-  let grant = grantFor(backend, spawn?.mode)
+  let grant = grantFor(backend, spawn?.mode ?? undefined)
   if (leading.permission !== null || leading.sandbox !== null) {
     const asked = askedFor(backend, grant, leading.permission, leading.sandbox)
-    if ('error' in asked) return `[delegate] ${AGENT_NAME[backend]} · failed\nerror: ${asked.error}`
-    grant = asked.wider ? await confirmWider($, backend, grant, asked.grant, line => notes.push(line)) : asked.grant
+    if ('error' in asked) return failed(backend, asked.error)
+    grant = asked.wider ? await confirmWider($, backend, leading.task, grant, asked.grant, line => notes.push(line)) : asked.grant
   }
 
   const before = await loadConversation($, agentId)
@@ -188,6 +244,9 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
   const effort = leading.effort ?? before?.effort ?? null
   const info = (await $.agent.list()).find(agent => agent.id === agentId)
   const cwd = info?.cwd ?? (await $.session.cwd())
+  if (!(await $.fs.exists(cwd))) {
+    return failed(backend, `the directory this delegate works in is gone: ${cwd}. Claude Code removes a worktree a delegate left unchanged; start a new delegate.`)
+  }
 
   const startedAt = Date.now()
   let label = labelOf(backend, model, null)
@@ -233,24 +292,41 @@ async function runDelegate($: EngineInterface, agentId: string, backend: Backend
     return null
   }
   show(outcome.status ?? 'failed', outcome.error === null ? (outcome.status ?? 'done') : oneLine(outcome.error, 100))
+  return withNotes(outcome.report ?? `[delegate] ${label} · failed\nerror: ${outcome.error ?? 'unknown'}`, notes)
+}
 
-  const report = withNotes(outcome.report ?? `[delegate] ${label} · failed\nerror: ${outcome.error ?? 'unknown'}`, notes)
-  return report
+/** Whether this run of the delegate hands its report back through the tool, or says it. */
+function handsBack(agentId: string, spawn: SpawnRecord | undefined): boolean {
+  const asked = handBackOffered.get(agentId)
+  handBackOffered.delete(agentId)
+  return asked ?? spawn?.mode === 'auto'
+}
+
+/** Gives the report: through the hand-back tool where the run is offered it, else as words. */
+async function* report($: EngineInterface, e: TurnStepInput, agentId: string, spawn: SpawnRecord | undefined, text: string) {
+  if (!handsBack(agentId, spawn)) {
+    await setTurn($, e.turnId, { handBackId: null, report: text })
+    return yield* say(e, text)
+  }
+  return yield* handBack(e, text, id => void setTurn($, e.turnId, { handBackId: id, report: text }).catch(() => {}))
 }
 
 async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: string, backend: Backend, signal: AbortSignal) {
-  const sent = handedBack.get(e.turnId)
-  if (sent !== undefined) {
-    handedBack.delete(e.turnId)
-    return yield* (await handBackFailed($, agentId, sent.id)) ? say(e, sent.report) : endTurn(e)
+  const taken = await turnOf($, e.turnId)
+  if (taken !== undefined) {
+    // This turn ran already: this is the step after its hand-back call, or a step after a
+    // reload of the plugin. The backend is not asked again.
+    if (taken.handBackId !== null && taken.report !== null) {
+      return yield* (await handBackFailed($, agentId, taken.handBackId)) ? say(e, taken.report) : endTurn(e)
+    }
+    if (taken.report !== null) return yield* endTurn(e)
+    return yield* say(e, failed(backend, 'the plugin was reloaded while this turn ran, so its report was lost. The delegate may have done part of the work; ask it again to go on.'))
   }
-  const report = await runDelegate($, agentId, backend, signal)
-  if (report === null) return yield* endTurn(e)
-  const asked = handBackOffered.get(agentId)
-  handBackOffered.delete(agentId)
-  const offered = asked ?? spawns.get(agentId)?.mode === 'auto'
-  if (!offered) return yield* say(e, report)
-  return yield* handBack(e, report, id => handedBack.set(e.turnId, { id, report }))
+  await setTurn($, e.turnId, { handBackId: null, report: null })
+  const spawn = await awaitSpawn($, agentId)
+  const text = await runDelegate($, agentId, backend, spawn, signal)
+  if (text === null) return yield* endTurn(e)
+  return yield* report($, e, agentId, spawn, text)
 }
 
 /** Runs the bridge for a listing or a check, and returns what it printed. */
@@ -260,9 +336,11 @@ async function bridgeText($: EngineInterface, args: string[]): Promise<string> {
       cwd: await $.session.cwd(),
       timeoutMs: 120_000,
     })
-    return (run.stdout.trim() || run.stderr.trim() || `The bridge exited with code ${run.exitCode}.`)
+    return run.stdout.trim() || run.stderr.trim() || `The bridge exited with code ${run.exitCode}.`
   } catch (error) {
-    return `Could not run Node for the delegate plugin: ${String(error)}. It needs Node.js 18.18 or later on PATH.`
+    const message = String(error)
+    const hint = /ENOENT|not found/i.test(message) ? ' It needs Node.js 18.18 or later on PATH.' : ''
+    return `The delegate plugin's bridge did not finish: ${message}.${hint}`
   }
 }
 
@@ -272,7 +350,6 @@ const backendArg = (text: unknown): string[] => {
 }
 
 export const register: Register = on => {
-
   on('session.start', async ($, e, next) => {
     // The model of these agents is never called, so they need no tools of their own; the
     // hand-back tool, which the plugin calls for them, is added by Claude Code itself and
@@ -307,8 +384,11 @@ export const register: Register = on => {
     const spawned = await next(e)
     const backend = backendOfType(e.subagentType)
     if (backend !== undefined && spawned.agentId !== undefined) {
-      spawns.set(spawned.agentId, { backend, mode: e.permissionMode, rowId: e.tool_use_id })
       notOurs.delete(spawned.agentId)
+      await $.state.set(
+        { plugin: 'delegate', key: 'spawn', id: spawned.agentId },
+        { backend, mode: e.permissionMode ?? null, rowId: e.tool_use_id },
+      )
     }
     return spawned
   })
@@ -328,11 +408,11 @@ export const register: Register = on => {
   }).catch(async function* ($, e, next) {
     // Never let a delegate's step fall through to the placeholder model.
     const backend = await delegateOf($, e.agentId)
-    if (backend === undefined) return yield* next(e)
+    if (backend === undefined || e.agentId === undefined) return yield* next(e)
     const why = next.error === undefined ? 'unknown' : `${next.error.kind}${next.error.message ? `: ${next.error.message}` : ''}`
-    const report = `[delegate] ${AGENT_NAME[backend]} · failed\nerror: the plugin failed to run this turn (${why}).`
-    if (handedBack.has(e.turnId)) return yield* say(e, report)
-    return yield* handBack(e, report, id => handedBack.set(e.turnId, { id, report }))
+    const taken = await turnOf($, e.turnId)
+    if (taken?.handBackId) return yield* say(e, taken.report ?? failed(backend, `the plugin failed to run this turn (${why}).`))
+    return yield* report($, e, e.agentId, await spawnOf($, e.agentId), failed(backend, `the plugin failed to run this turn (${why}).`))
   })
 
   // Under the Agent or SendMessage row that started a delegate turn: who, and what it did last.

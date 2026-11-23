@@ -124,13 +124,28 @@ const PLAIN_DECISIONS = COMMAND_DECISIONS.filter((choice) => choice.id === "decl
  */
 function approvalRequest(method, params, item) {
   if (method === "item/commandExecution/requestApproval") {
+    const command = params?.command ?? item?.command ?? "a command";
+    const network = params?.networkApprovalContext;
+    if (network?.host) {
+      return {
+        kind: "network",
+        title: `${network.protocol ? `${network.protocol}://` : ""}${network.host} (for \`${command}\`)`,
+        cwd: params?.cwd ?? item?.cwd ?? null,
+        reason: params?.reason ?? null,
+        choices: COMMAND_DECISIONS
+      };
+    }
     return {
-      kind: "command",
-      title: params?.command ?? item?.command ?? "a command",
+      // "writeStdin": input for a command that is already running, not a new command.
+      kind: params?.kind === "writeStdin" ? "input" : "command",
+      title: command,
       cwd: params?.cwd ?? item?.cwd ?? null,
       reason: params?.reason ?? null,
       choices: COMMAND_DECISIONS
     };
+  }
+  if (method === "item/permissions/requestApproval") {
+    return { kind: "permissions", title: describePermissions(params?.permissions), cwd: params?.cwd ?? null, reason: params?.reason ?? null, choices: PLAIN_DECISIONS };
   }
   if (method === "item/fileChange/requestApproval") {
     const changes = (item?.changes ?? []).map(describeChange);
@@ -145,13 +160,25 @@ function approvalRequest(method, params, item) {
   return { kind: "approval", title: params?.reason ?? method, cwd: null, reason: null, choices: PLAIN_DECISIONS };
 }
 
+/** "write /a, /b; read /c; network": what a request for more permissions asks for. */
+function describePermissions(permissions) {
+  const fs = permissions?.fileSystem ?? {};
+  const parts = [];
+  const write = [...(fs.write ?? []), ...(fs.entries ?? []).filter((e) => e?.access === "write").map((e) => e?.path?.path ?? JSON.stringify(e?.path))];
+  const read = [...(fs.read ?? []), ...(fs.entries ?? []).filter((e) => e?.access === "read").map((e) => e?.path?.path ?? JSON.stringify(e?.path))];
+  if (write.length) parts.push(`write ${write.join(", ")}`);
+  if (read.length) parts.push(`read ${read.join(", ")}`);
+  if (permissions?.network?.enabled) parts.push("network access");
+  return parts.length ? parts.join("; ") : JSON.stringify(permissions ?? {});
+}
+
 /** What the user wrote in place of picking an answer, or null. */
 const wordsOf = (answer) =>
   answer && typeof answer === "object" && typeof answer.text === "string" && answer.text.trim() ? answer.text.trim() : null;
 
 /** How the user's own words reach Codex, with what they are about. */
 const relayWords = (request, words) =>
-  `About your request to ${request.kind === "command" ? `run \`${request.title}\`` : `do this: ${request.title}`}: the user did not allow it, and wrote:\n\n${words}`;
+  `About your request to ${request.kind === "command" ? `run \`${request.title}\`` : `${request.kind}: ${request.title}`}: the user did not allow it, and wrote:\n\n${words}`;
 
 /** The answer picked, by its id; a caller that answers true or false picks the first of that kind. */
 function pickChoice(choices, answer) {
@@ -173,7 +200,11 @@ async function needsOpenaiLogin() {
   try {
     const asked = (async () => {
       await handshake(client);
-      return client.request("getAuthStatus", { includeToken: false, refreshToken: false });
+      try {
+        return await client.request("account/read", { refreshToken: false });
+      } catch {
+        return client.request("getAuthStatus", { includeToken: false, refreshToken: false });
+      }
     })();
     const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 15_000).unref());
     const status = await Promise.race([asked, timeout, client.failure]);
@@ -339,11 +370,12 @@ export const codexBackend = {
     client.onNotification = (method, params) => {
       if (method === "thread/started") return nameSubagent(params?.thread?.id, params?.thread);
       if (method === "thread/name/updated") return nameSubagent(params?.threadId, { name: params?.threadName });
+      // Kept from every thread, so that a request from one of Codex's own agents can say what it is about.
+      if (method === "item/started" && params?.item?.id) startedItems.set(params.item.id, params.item);
       if (threadId && params?.threadId && params.threadId !== threadId) return onSubagentEvent(method, params);
       switch (method) {
         case "item/started": {
           const item = params?.item ?? {};
-          if (item.id) startedItems.set(item.id, item);
           if (item.type === "commandExecution") {
             onEvent({ type: "progress", text: `running command: ${oneLine(item.command)}` });
           }
@@ -413,6 +445,15 @@ export const codexBackend = {
         // above), and carries on with the turn, or stops it after "cancel".
         return { decision: choice.id };
       }
+      if (method === "item/permissions/requestApproval") {
+        // An answer grants what was asked for, for this turn, or nothing.
+        if (!choice.allow) {
+          const action = { kind: "permissions", title: request.title, status: "declined" };
+          actions.push(action);
+          onEvent({ type: "action", action });
+        }
+        return { permissions: choice.allow ? params?.permissions ?? {} : {}, scope: "turn" };
+      }
       // A kind of approval that comes with no step of its own to report it.
       if (!choice.allow) {
         const action = { kind: "approval", title: request.title, status: "declined" };
@@ -453,9 +494,19 @@ export const codexBackend = {
         approvalsReviewer: policy.approvalsReviewer,
         ...(model ? { model } : {})
       };
-      const opened = resumeSessionId
-        ? await client.request("thread/resume", { threadId: resumeSessionId, excludeTurns: true, ...threadParams })
-        : await client.request("thread/start", { ephemeral: false, ...threadParams });
+      const notes = [];
+      let opened = null;
+      if (resumeSessionId) {
+        try {
+          opened = await client.request("thread/resume", { threadId: resumeSessionId, excludeTurns: true, ...threadParams });
+        } catch (error) {
+          // A conversation whose session is gone (its rollout deleted, another CODEX_HOME)
+          // goes on in a new one rather than failing every turn from here on.
+          notes.push(`the earlier Codex session could not be resumed (${error?.message ?? error}), so this turn started a new one, which knows nothing of the earlier conversation`);
+          resumeSessionId = undefined;
+        }
+      }
+      opened ??= await client.request("thread/start", { ephemeral: false, ...threadParams });
       threadId = opened?.thread?.id ?? resumeSessionId;
       const usedModel = opened?.model ?? opened?.thread?.model ?? model ?? null;
       // The effort this turn runs at: the one asked for, or the one Codex opened the thread with.
@@ -520,7 +571,8 @@ export const codexBackend = {
         text,
         actions,
         usage: toUsage(usage),
-        error: status === "failed" ? turn.error?.message ?? lastError ?? "Codex reported a failed turn." : null
+        error: status === "failed" ? turn.error?.message ?? lastError ?? "Codex reported a failed turn." : null,
+        notes
       };
     } finally {
       stopGrace();

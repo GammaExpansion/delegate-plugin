@@ -41,10 +41,14 @@ export async function* endTurn(e: TurnStepInput): Step {
   return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
 }
 
-/** Whether the hand-back call `id` came back as an error (no such tool, or refused). */
+/**
+ * Whether the hand-back call `id` came back as an error (no such tool, or refused). Where
+ * the conversation cannot be read, it is taken as failed: the report is then said once
+ * more, rather than lost.
+ */
 export async function handBackFailed($: EngineInterface, agentId: string, id: string): Promise<boolean> {
   const read = await $.session.messages({ agentId, last: 4 })
-  if ('deny' in read) return false
+  if ('deny' in read) return true
   for (const message of read) {
     for (const result of message.toolResults ?? []) {
       if (result.tool_use_id === id) return result.isError

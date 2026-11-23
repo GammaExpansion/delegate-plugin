@@ -169,7 +169,7 @@ export function renderSetup(report) {
       : backend.auth === "ok"
         ? "ready"
         : backend.auth === "provider"
-          ? "ready (custom provider, API key not checked)"
+          ? "ready (custom provider)"
           : backend.auth === "missing"
           ? "installed, not logged in"
           : "installed, login not checked";

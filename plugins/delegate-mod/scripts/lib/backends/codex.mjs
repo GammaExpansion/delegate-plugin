@@ -499,16 +499,19 @@ export const codexBackend = {
         turn = await runTurn(followUps.splice(0).join("\n\n"));
       }
 
-      const finals = messages.filter((m) => m.phase === "final_answer");
-      const text = finals.length
-        ? finals.map((m) => m.text).join("\n\n")
-        : messages.length
-          ? messages[messages.length - 1].text
-          : "";
-
       let status = "failed";
       if (cancelled || turn.status === "interrupted") status = "cancelled";
       else if (turn.status === "completed") status = "completed";
+
+      // The answer is Codex's final answer. Only a turn that ran its course without
+      // marking one takes its last message instead: a stopped turn's last message is
+      // something Codex said on the way, not an answer.
+      const finals = messages.filter((m) => m.phase === "final_answer");
+      const text = finals.length
+        ? finals.map((m) => m.text).join("\n\n")
+        : messages.length && status !== "cancelled"
+          ? messages[messages.length - 1].text
+          : "";
 
       return {
         status,

@@ -58,7 +58,7 @@ export function renderReport({ backend, permission, sandbox, approvals, mode, mo
     if (declined.length > 10) lines.push(`- … ${declined.length - 10} more`);
     lines.push(declinedNote(approvals, mode));
   }
-  lines.push("", result.text ? result.text : "(no message)");
+  lines.push("", result.text ? result.text : result.status === "cancelled" ? "(no answer: the run was stopped)" : "(no message)");
   return lines.join("\n");
 }
 

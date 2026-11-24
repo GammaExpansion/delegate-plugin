@@ -268,7 +268,7 @@ This conversation is in auto mode, which gives Codex Agent approve-for-me. The t
 
 The plugin is a mod: its hooks are a TypeScript module that runs inside Claude Code.
 
-- `delegate:codex` and `delegate:agy` are registered as agent types, but their model is never called. A `turn.step` hook answers every model request of their loops. The first of a turn reads the latest message sent to the subagent and starts the turn on the backend; while the turn runs, each request is answered with a row (a Bash call that a `tool.call` hook of the plugin answers, and that runs nothing); the one after the turn has ended is answered with the backend's answer, as the subagent's report. Where Claude Code offers the subagent its hand-back tool (in auto mode), the report goes through it; elsewhere it is the subagent's last words.
+- `delegate:codex` and `delegate:agy` are registered as agent types, but their model does none of the work. A `turn.step` hook answers the model requests of their loops. The first of a turn reads the latest message sent to the subagent and starts the turn on the backend; while the turn runs, each request is answered with a row (a Bash call that a `tool.call` hook of the plugin answers, and that runs nothing); the one after the turn has ended is answered with the backend's answer, as the subagent's report. Outside auto mode the report is the subagent's last words. In auto mode it goes through Claude Code's hand-back tool, by a call the agent type's own model (Sonnet) makes: see [A report the review has seen](#a-report-the-review-has-seen).
 - The module cannot run Node, so each turn starts `scripts/bridge.mjs`. The request goes in on stdin, events come back as JSON lines, and answers to the backend's requests go back as files in a control directory the bridge makes for the turn. That directory is in the system temp directory, where a backend's sandbox can write, so every file the bridge reads must carry a random token it sent to the module on stdout alone: a delegate cannot answer its own request. When the subagent is stopped, the bridge is stopped, and it interrupts the backend.
 - The permission mode comes with every spawn of the subagent, the first and each continuation, so a delegate follows a mode you switch to between turns.
 - Each subagent's backend session id is kept in the plugin's store, so a continued conversation resumes the same backend session. A session that can no longer be resumed fails the turn, and nothing is started in its place: a delegate that has lost what it knew does not carry on as if it had not.
@@ -299,11 +299,17 @@ To see what a backend really sent, set `DELEGATE_TRACE=1` where Claude Code star
 
 ### A delegate is a native subagent
 
-Earlier versions had a forwarding subagent run a script in a loop: start a job, wait on it in short calls, read the answer from a file. Every step was a model call, and background runs, follow-ups, stopping and worktrees each needed machinery of their own. Now Claude Code's own subagent does all of that, and the plugin answers for the subagent's model. No model sits between Claude and the delegate.
+Earlier versions had a forwarding subagent run a script in a loop: start a job, wait on it in short calls, read the answer from a file. Every step was a model call, and background runs, follow-ups, stopping and worktrees each needed machinery of their own. Now Claude Code's own subagent does all of that, and the plugin answers for the subagent's model. No model sits between Claude and the delegate while it works.
 
 ### A turn is many short steps
 
 Claude Code ends a background subagent whose model request has been silent for ten minutes, and a delegate's turn can be silent for much longer: one long command, or a question waiting for you. So the plugin does not hold one request open for the whole turn. The turn runs on by itself, and each request of the subagent's loop is answered at once with a row: a tool call the plugin writes and then answers itself, when the delegate has done something more. The last request is answered with the report. A turn can take as long as the backend takes, and what it did on the way can be read row by row.
+
+### A report the review has seen
+
+In auto mode Claude Code reviews what a subagent did before its report reaches the conversation, and it does so through the reply of the subagent's model that hands the report back. A report the plugin handed back itself had no such reply behind it, and arrived under a note that the review was unavailable. So in auto mode the agent type's model is called once per turn, at the end. The report is in front of it as the result of the last row, and its only instruction is to hand that back unchanged. The plugin holds the model's reply until it is whole and lets it through only if it is a hand-back of the report as it is, to the character. Anything else is dropped, and the plugin hands the report back itself, under the note, as before.
+
+The call reads about 7,000 tokens and the report, and writes the report out once more: two seconds for a report of a line, half a minute for one of 18,000 characters. A report longer than 20,000 characters is not put to the model: Claude Code would show it only the beginning, and copying it would cost too much. Such a report still arrives under the note.
 
 ### Permissions follow the mode, and more needs your pick
 
@@ -343,8 +349,9 @@ Then add it to `hooks/agents.ts` (its agent type), `hooks/permissions.ts` (its o
 - In auto mode the report goes through Claude Code's internal hand-back tool, which is not part of the documented API.
 - A turn lives inside its subagent. Stopping the subagent, a reload or an update of the plugin, or quitting Claude Code ends the turn in flight, and a stopped turn hands back no report. The backend's session stays: continue it with SendMessage, or in a later Claude session with `--resume` and the id from an earlier report.
 - The records of turns are for looking, not for running: `status` and `result` show a turn, but nothing can take a stopped turn up where it left off, other than continuing its conversation.
-- In auto mode every report arrives under a note that the auto mode classifier was unavailable when reviewing the subagent's work. Claude Code reviews a subagent's report through its own model's reply, and a delegate's report is not written by that model, so there is nothing for it to review. The note is accurate: the delegate's work was not reviewed by Claude Code, and Claude is told to check it. The plugin cannot remove it; in other modes no such review runs and no note appears.
-- The subagent's panel names the placeholder model of the agent type (Haiku), not the backend's model. The report's headline names the real one.
+- In auto mode a report longer than 20,000 characters, and one the model did not hand back unchanged, arrives under a note that the auto mode classifier was unavailable when reviewing the subagent's work. The note is accurate: that report was not reviewed by Claude Code, and Claude is told to check it. In other modes no such review runs and no note appears.
+- In auto mode each turn makes one call of the agent type's model (Sonnet) to hand its report back, which is billed like any subagent's call. In other modes no model is called.
+- The subagent's panel names the model of the agent type (Sonnet), not the backend's model. The report's headline names the real one.
 - A turn's rows are drawn as shell commands, and the agent types list the Bash tool for it. No command of a delegate's ever runs: the plugin answers the rows it wrote itself and refuses any other.
 - A message sent to a delegate while its turn runs is not passed on to the backend. The report names it, so that it can be sent again.
 - A turn that nothing follows for four minutes is stopped by its bridge, with a note in its record. That is how a turn ends when its subagent went away between two steps; a machine that slept is not counted.

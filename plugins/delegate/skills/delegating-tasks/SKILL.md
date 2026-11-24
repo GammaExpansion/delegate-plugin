@@ -63,7 +63,7 @@ A report is a headline (agent, model, outcome, time, permission, turn id), a `se
 - An answer that is a question is not a result: answer it if this conversation can, otherwise ask the user.
 - If the run failed or was stopped, say so. Do not do the task yourself and present it as the delegate's.
 - Pass these notes on: a command left running is still running on this machine; agy without its auto mode ran with `accept-edits`, so its commands were declined (do not add `--permission` to get around it).
-- In auto mode a report arrives under Claude Code's note that its classifier was unavailable. That is expected for a delegate.
+- In auto mode a long report may arrive under Claude Code's note that its classifier was unavailable. That is expected for a delegate: check the work as you would anyway.
 - A backend that is missing or not logged in: point the user to `/delegate:setup`.
 
 ## Turns on record, and a turn that was cut off

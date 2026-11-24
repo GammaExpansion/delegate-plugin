@@ -9,7 +9,7 @@ description: How to hand a task to another vendor's agent - OpenAI Codex (GPT mo
 | --- | --- |
 | Codex, GPT, or a GPT model (Astra, Sol, Terra, Luna, Codex Spark) | `delegate:codex` |
 | Antigravity, agy, Gemini, or a Gemini model (Neon, Carbon, Argon, Hydrogen, Flash) | `delegate:agy` |
-| Claude, Opus, Sonnet, Haiku | your own subagent, not a delegate |
+| Claude, Fable, Opus, Sonnet, Haiku | your own subagent, not a delegate |
 
 Start a delegate with the Agent tool like any subagent: in the background if the user does not want to wait, with `isolation: "worktree"` if it would edit files being edited elsewhere. One subagent is one conversation; "two Astra agents" means two subagents, started in the same message.
 

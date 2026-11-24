@@ -3,7 +3,7 @@ import { notImplemented } from "../rpc.mjs";
 import { oneLine } from "../text.mjs";
 
 /** How this plugin introduces itself to an agent. */
-export const CLIENT_INFO = { name: "delegate-plugin", title: "Delegate plugin for Claude Code", version: "1.1.1" };
+export const CLIENT_INFO = { name: "delegate-plugin", title: "Delegate plugin for Claude Code", version: "1.1.2" };
 
 /**
  * For a request from the agent that nobody here can answer (a question for the user in

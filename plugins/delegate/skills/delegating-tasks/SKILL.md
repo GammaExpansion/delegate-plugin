@@ -61,6 +61,7 @@ Before a delegate turn that can edit, check that its files do not overlap with f
 - A session that cannot be continued fails the turn; nothing is started in its place. One subagent is one conversation: a second, different `--resume` to the same subagent is refused.
 - Only the options named here go on the first line. Anything else that looks like an option there is refused, so do not pass on options from other tools or earlier versions (`--brief-file`, `--timeout-sec`): put the brief's text in the prompt.
 - A report whose answer is a question is not a result. Answer it if this conversation can, otherwise ask the user.
+- Wait for a delegate's report before you send it anything more. A message sent while its turn runs does not reach the backend; the report then says so, and the message has to be sent again.
 
 ## Reports
 

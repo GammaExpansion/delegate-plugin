@@ -17,6 +17,8 @@ export type TurnRequest = {
   model: string | null
   effort: string | null
   resumeSessionId: string | null
+  /** The session was named for this turn: if it cannot be continued the turn fails, and no new one is started. */
+  resumeNamed: boolean
 }
 
 export type Action = { kind: string; title: string; status?: string; exitCode?: number | null; permission?: string }

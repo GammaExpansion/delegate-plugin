@@ -49,6 +49,8 @@ function declinedNote(approvals, mode) {
 export function renderReport({ backend, permission, sandbox, approvals, mode, model, effort, durationMs, result }) {
   const option = sandbox === "disabled" ? `${permission}, no sandbox` : sandbox === "enabled" ? `${permission}, sandbox` : permission;
   const lines = [[`[delegate] ${agentLabel(backend, model, effort)}`, result.status, formatDuration(durationMs), option].join(" · ")];
+  // The backend's own id for the conversation: what --resume takes to continue it later.
+  if (result.sessionId) lines.push(`session: ${result.sessionId}`);
   if (result.error) lines.push(`error: ${result.error}`);
   if (result.status === "cancelled" && !result.error) lines.push("note: the run was stopped before it finished.");
   for (const note of result.notes ?? []) lines.push(`note: ${note}`);

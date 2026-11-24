@@ -19,22 +19,39 @@ test('a mode that is missing or unknown is taken as default', async () => {
   expect(grantFor('agy', 'constructor').mode).toBe('default')
 })
 
+/** The options of a prompt whose first line is one the plugin accepts. */
+function accepted(text: string) {
+  const taken = takeOptions(text)
+  if ('error' in taken) throw new Error(taken.error)
+  return taken
+}
+
 test('the options come off the first line, and the task is left as it was', async () => {
-  const taken = takeOptions('--model gpt-6.2-astra --effort=high --permission full-access --sandbox disabled\nReview src/auth.ts\n--model inside the task stays')
+  const taken = accepted('--model gpt-6.2-astra --effort=high --permission full-access --sandbox disabled --resume 841a14cd-0000\nReview src/auth.ts\n--model inside the task stays')
+  expect(taken.resume).toBe('841a14cd-0000')
   expect(taken.model).toBe('gpt-6.2-astra')
   expect(taken.effort).toBe('high')
   expect(taken.permission).toBe('full-access')
   expect(taken.sandbox).toBe('disabled')
   expect(taken.task).toBe('Review src/auth.ts\n--model inside the task stays')
 
-  const other = takeOptions('--verbose please explain math.js')
-  expect(other.model).toBe(null)
-  expect(other.task).toBe('--verbose please explain math.js')
-
   // Only the first line is read: an option on a later line is part of the task.
-  const later = takeOptions('Fix the flag parsing\n--model is ignored here')
+  const later = accepted('Fix the flag parsing\n--model is ignored here\n--unknown thing')
   expect(later.model).toBe(null)
-  expect(later.task).toBe('Fix the flag parsing\n--model is ignored here')
+  expect(later.resume).toBe(null)
+  expect(later.task).toBe('Fix the flag parsing\n--model is ignored here\n--unknown thing')
+})
+
+test('an option the plugin does not know on the first line is refused, not handed to the delegate', async () => {
+  expect(takeOptions('--verbose please explain math.js')).toEqual({
+    error: "unknown option --verbose on the prompt's first line. The options are --model, --effort, --permission, --sandbox, --resume. A task that itself begins with two dashes should begin with a word instead.",
+  })
+  // An option of an earlier version, and misspelt ones, after options that are known.
+  expect('error' in takeOptions('--brief-file /tmp/brief.md\nDo what the brief says')).toBe(true)
+  expect('error' in takeOptions('--model gpt-6.2-astra --resum 841a14cd\nGo on')).toBe(true)
+  expect('error' in takeOptions('--permision default\nReview it')).toBe(true)
+  // Two dashes with no value after them are not an option.
+  expect(accepted('--\nReview it').task).toBe('--\nReview it')
 })
 
 test('a task that asks for more than the mode gives is told apart from one that asks for less', async () => {

@@ -5,6 +5,12 @@
 // ends its run; elsewhere its last words are its report. register.tsx picks the way for
 // each run; should a hand-back call come back as an error all the same, the step after it
 // says the report as words.
+//
+// While the backend works, the step would say nothing, and Claude Code ends a background
+// subagent whose model request is silent for ten minutes. So the step gives a sign of life
+// now and then as a piece of thinking (`alive`): thinking a hook streams is shown and not
+// recorded, so the report that follows is what it would have been without it. The report
+// then goes in the block after the thinking, as a model's answer does.
 
 import type { EngineInterface, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
@@ -18,21 +24,26 @@ function newToolUseId(): string {
 }
 
 /** The report as a call of the hand-back tool. Returns the call's id, to check its result. */
-export async function* handBack(e: TurnStepInput, report: string, onId: (id: string) => void): Step {
+export async function* handBack(e: TurnStepInput, report: string, onId: (id: string) => void, index = 0): Step {
   const id = newToolUseId()
   onId(id)
   const input = { message: report }
-  yield { kind: 'tool', index: 0, id, name: HANDBACK }
-  yield { kind: 'input', index: 0, json: JSON.stringify(input) }
+  yield { kind: 'tool', index, id, name: HANDBACK }
+  yield { kind: 'input', index, json: JSON.stringify(input) }
   yield { kind: 'stop', stopReason: 'tool_use', usage: null }
   return { turnId: e.turnId, index: e.index, answer: '', toolUses: [{ name: HANDBACK, input }], stopReason: 'tool_use', usage: null }
 }
 
 /** The report as the turn's last words. */
-export async function* say(e: TurnStepInput, text: string): Step {
-  yield { kind: 'text', index: 0, text }
+export async function* say(e: TurnStepInput, text: string, index = 0): Step {
+  yield { kind: 'text', index, text }
   yield { kind: 'stop', stopReason: 'end_turn', usage: null }
   return { turnId: e.turnId, index: e.index, answer: text, toolUses: [], stopReason: 'end_turn', usage: null }
+}
+
+/** A sign of life while the backend works: one line of thinking, in block 0. */
+export function alive(line: string): TurnStepChunk {
+  return { kind: 'thinking', index: 0, text: `${line}\n` }
 }
 
 /** Nothing more to say: the report went through the hand-back tool. */

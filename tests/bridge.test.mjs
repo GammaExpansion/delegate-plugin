@@ -56,7 +56,8 @@ test("a turn ends with a result and a report, and the control directory is gone"
   assert.equal(code, 0);
   assert.equal(result.result.status, "completed");
   assert.equal(result.result.sessionId, "thread-main");
-  assert.match(result.report, /^\[delegate\] Codex Agent \(fake-model xHigh\) · completed · \d+\.\ds · read-only\n\nall done$/);
+  // The session's id is under the headline: it is what --resume takes to continue it later.
+  assert.match(result.report, /^\[delegate\] Codex Agent \(fake-model xHigh\) · completed · \d+\.\ds · read-only\nsession: thread-main\n\nall done$/);
   assert.ok(events.some((event) => event.type === "event" && event.event.type === "session"));
   assert.equal(fs.existsSync(controlDir), false);
 });
@@ -308,6 +309,27 @@ test("agy: a session that cannot be resumed is replaced by a new one, with a not
   );
   assert.equal(result.result.status, "completed");
   assert.match(result.report, /note: the earlier agy session could not be resumed \(session not found\), so this turn started a new one/);
+});
+
+test("a session the turn names itself must be there: the turn fails and no new session is started", async () => {
+  const record = path.join(scratch, "codex-named-record.jsonl");
+  const codex = await runTurn(
+    { backend: "codex", permission: "read-only", resumeSessionId: "gone-thread", resumeNamed: true },
+    { env: { FAKE_CODEX_SCENARIO: "normal", FAKE_CODEX_RESUME_FAILS: "1", FAKE_CODEX_RECORD: record } }
+  );
+  assert.equal(codex.result.result.status, "failed");
+  assert.match(codex.result.report, /^\[delegate\] Codex Agent · failed · \d+\.\ds · read-only\nerror: Codex could not resume session gone-thread: no rollout found for thread$/);
+  assert.equal(fs.existsSync(record), false, "no thread was opened");
+  assert.ok(!codex.events.some((event) => event.type === "event" && event.event.type === "session"));
+
+  const agy = await runTurn(
+    { backend: "agy", permission: "default", resumeSessionId: "gone-session", resumeNamed: true },
+    { env: { FAKE_AGY_SCENARIO: "replay-late", FAKE_AGY_LOAD_FAILS: "1" } }
+  );
+  assert.equal(agy.result.result.status, "failed");
+  assert.match(agy.result.report, /error: agy could not resume session gone-session: session not found$/);
+  assert.doesNotMatch(agy.result.report, /^session: /m);
+  assert.ok(!agy.events.some((event) => event.type === "event" && event.event.type === "session"));
 });
 
 test("agy: with no refusal of its own on offer, one is put first, and answers cancelled", async () => {

@@ -18,6 +18,8 @@ import { codexBackend } from "./codex.mjs";
  * @property {string} [model]             Backend-specific model id.
  * @property {string} [effort]            Backend-specific reasoning effort.
  * @property {string} [resumeSessionId]   Continue this backend session instead of starting fresh.
+ * @property {boolean} [resumeNamed]      The caller named that session for this turn: if it cannot be
+ *                                        continued the turn fails, where otherwise a new one is started.
  * @property {AbortSignal} [signal]       Abort to interrupt the running turn.
  * @property {string | null} [traceFile]  Write every message to and from the backend here (see DELEGATE_TRACE).
  * @property {(event: BackendEvent) => void} onEvent

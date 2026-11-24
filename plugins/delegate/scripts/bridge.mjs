@@ -71,6 +71,7 @@ function traceFileFor(backendName) {
  * @property {string | null} [model]
  * @property {string | null} [effort]
  * @property {string | null} [resumeSessionId]
+ * @property {boolean} [resumeNamed]   the turn names that session itself: it fails if the session cannot be continued
  */
 
 async function cmdRun() {
@@ -148,6 +149,7 @@ async function cmdRun() {
       model: request.model || undefined,
       effort: request.effort || undefined,
       resumeSessionId: request.resumeSessionId || undefined,
+      resumeNamed: Boolean(request.resumeNamed),
       signal: controller.signal,
       traceFile,
       onEvent,
@@ -156,7 +158,7 @@ async function cmdRun() {
   } catch (error) {
     result = {
       status: controller.signal.aborted ? "cancelled" : "failed",
-      sessionId: request.resumeSessionId ?? null,
+      sessionId: request.resumeNamed ? null : (request.resumeSessionId ?? null),
       model: shown.model,
       text: "",
       actions: [],

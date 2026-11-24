@@ -309,7 +309,7 @@ Claude Code ends a background subagent whose model request has been silent for t
 
 In auto mode Claude Code reviews what a subagent did before its report reaches the conversation, and it does so through the reply of the subagent's model that hands the report back. A report the plugin handed back itself had no such reply behind it, and arrived under a note that the review was unavailable. So in auto mode the agent type's model is called once per turn, at the end. The report is in front of it as the result of the last row, and its only instruction is to hand that back unchanged. The plugin holds the model's reply until it is whole and lets it through only if it is a hand-back of the report as it is, to the character. Anything else is dropped, and the plugin hands the report back itself, under the note, as before.
 
-The call reads about 7,000 tokens and writes as many again as the report has, in a few seconds. A report longer than 20,000 characters is not put to the model: Claude Code would show it only the beginning, and copying it would cost too much. Such a report still arrives under the note.
+The call reads about 7,000 tokens and the report, and writes the report out once more: two seconds for a report of a line, half a minute for one of 18,000 characters. A report longer than 20,000 characters is not put to the model: Claude Code would show it only the beginning, and copying it would cost too much. Such a report still arrives under the note.
 
 ### Permissions follow the mode, and more needs your pick
 

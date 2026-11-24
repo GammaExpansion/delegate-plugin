@@ -9,9 +9,10 @@
 // that hands the report back, so that Claude Code's review of a subagent's work covers it.
 //
 // A turn runs on between the steps of its subagent's loop (Run, below). While it does,
-// each step is answered with a row: a Bash call written here, answered here, that runs no
-// command and returns when the delegate has done something more. The rows are what the
-// user sees the delegate do, and they keep every step short.
+// each step is answered with a row: a Bash call written here that runs the bridge's `wait`
+// and so returns when the delegate has done something more. The rows are what the user
+// sees the delegate do, they are listed among the agent's tasks, and they keep every step
+// short. Where the command cannot be run, the row is answered here and runs nothing.
 //
 // What a delegate may do follows the permission mode of the conversation that started or
 // continued it (permissions.ts), read from the spawn on every turn.
@@ -22,7 +23,7 @@
 
 import type { EngineInterface, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import type { Progress, SpawnRecord, TurnRecord } from '../types'
-import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './agents'
+import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType, labelOf, titleOf } from './agents'
 import { endTurn, handBack, handBackFailed, latestMessage, row, say } from './answer'
 import { oneLine, runTurn, type ApprovalAnswer, type ApprovalRequest, type TurnControl } from './bridge'
 import { takeOptions } from './options'
@@ -49,8 +50,13 @@ type Run = {
   control: TurnControl | null
   /** How far into the turn's log the rows have shown. */
   offset: number
-  /** The ids of the row calls written for this turn: only these are answered. */
-  rows: Set<string>
+  /**
+   * The row calls written for this turn, by id: one that runs the bridge's `wait`, or one
+   * held here and answered by this module. No other Bash call of a delegate is let through.
+   */
+  rows: Map<string, 'run' | 'held'>
+  /** Whether rows still run their command; false once one could not, for the rest of the turn. */
+  runsRows: boolean
   /** The message that started the turn, to tell a later one from it. */
   promptUuid: string | null
   /** Messages that reached the subagent while the turn ran, which the backend never saw. */
@@ -136,12 +142,6 @@ async function awaitSpawn($: EngineInterface, agentId: string): Promise<SpawnRec
     await $.clock.sleep(100)
   }
   return undefined
-}
-
-function labelOf(backend: Backend, model: string | null, effort: string | null): string {
-  if (model === null) return AGENT_NAME[backend]
-  const level = effort === null ? '' : effort.toLowerCase() === 'xhigh' ? ' xHigh' : ` ${effort.toLowerCase()}`
-  return `${AGENT_NAME[backend]} (${model}${level})`
 }
 
 function elapsed(ms: number): string {
@@ -403,7 +403,7 @@ async function runDelegate(
   for (const text of run.missed.values()) {
     notes.push(`a message sent to this delegate while it worked was not passed on to it. Send it again to go on: "${oneLine(text, 200)}"`)
   }
-  return withNotes(outcome.report ?? `[delegate] ${run.label} · failed\nerror: ${outcome.error ?? 'unknown'}`, notes)
+  return withNotes(outcome.report ?? failed(backend, outcome.error ?? 'unknown'), notes)
 }
 
 /** Whether this run of the delegate hands its report back through the tool, or says it. */
@@ -428,12 +428,13 @@ function startRun($: EngineInterface, turnId: string, agentId: string, backend: 
     turnId,
     spawn,
     startedAt: Date.now(),
-    label: AGENT_NAME[backend],
+    label: labelOf(backend, null, null),
     line: 'starting',
     cwd: null,
     control: null,
     offset: 0,
-    rows: new Set(),
+    rows: new Map(),
+    runsRows: true,
     promptUuid: null,
     missed: new Map(),
     stopped: false,
@@ -509,6 +510,25 @@ async function followRun($: EngineInterface, run: Run): Promise<string> {
   return text.length > ROW_TEXT_AT_MOST ? `…\n${text.slice(-ROW_TEXT_AT_MOST)}` : text || run.line
 }
 
+/** A path as an argument for the shell a row's command runs in. */
+function quoted(path: string): string {
+  const posix = /^[A-Za-z]:\\/.test(path) ? path.replaceAll('\\', '/') : path
+  return `'${posix.replaceAll("'", `'\\''`)}'`
+}
+
+/** The command a row runs: the bridge's `wait` on this turn's record, from where the rows have got to. */
+function waitCommand($: EngineInterface, run: Run): string | undefined {
+  const control = run.control
+  if (!run.runsRows || control === null || control.jobId === null || control.jobDir === null) return undefined
+  return `node ${quoted(`${$.plugin.root}/scripts/bridge.mjs`)} wait ${control.jobId} --from ${run.offset} --dir ${quoted(control.jobDir)} --text`
+}
+
+/** What a row's command printed, from the Bash tool's result. */
+function printed(result: unknown): string | null {
+  const stdout = typeof result === 'object' && result !== null ? (result as { stdout?: unknown }).stdout : undefined
+  return typeof stdout === 'string' ? stdout : null
+}
+
 type StepNext = ((e: TurnStepInput) => AsyncGenerator<TurnStepChunk, TurnStepResult>) & { readonly signal: AbortSignal }
 
 /**
@@ -571,8 +591,9 @@ async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: stri
     await setTurn($, e.turnId, { handBackId: null, report: null })
     run = startRun($, e.turnId, agentId, backend, await awaitSpawn($, agentId))
     runs.set(agentId, run)
-    // A turn that fails before it starts (a bad option, a session that is gone) is over at once.
-    await Promise.race([run.done, $.clock.sleep(300)])
+    // A turn that fails before it starts (a bad option, a session that is gone) is over at
+    // once; one that starts has its bridge up within a moment, and its first row can run.
+    for (let waited = 0; run.settled === null && run.control === null && waited < 2000; waited += 100) await $.clock.sleep(100)
   } else {
     await noteMissed($, agentId, run).catch(() => {})
   }
@@ -583,7 +604,13 @@ async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: stri
       return yield* endTurn(e)
     }
     const live = run
-    return yield* row(e, `${live.label} · ${elapsed(Date.now() - live.startedAt)} · ${oneLine(live.line, 120)}`, id => live.rows.add(id))
+    const command = waitCommand($, live)
+    return yield* row(
+      e,
+      `${live.label} · ${elapsed(Date.now() - live.startedAt)} · ${oneLine(live.line, 120)}`,
+      id => live.rows.set(id, command === undefined ? 'held' : 'run'),
+      command,
+    )
   }
   if ('error' in run.settled || run.settled.text === null) {
     runs.delete(agentId)
@@ -606,7 +633,7 @@ async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: stri
     // One last row, whose result is the report: that is where the model reads it from.
     const done = run
     return yield* row(e, `${done.label} · ${elapsed(Date.now() - done.startedAt)} · finished: handing the report back`, id => {
-      done.rows.add(id)
+      done.rows.set(id, 'held')
       done.reportRow = id
     })
   }
@@ -681,9 +708,16 @@ export const register: Register = on => {
 
   // Every spawn of a delegate, the first and each one SendMessage makes to continue it,
   // carries the permission mode of the conversation at that moment.
+  // Its title names the model the prompt asks for, so that the list of running tasks says
+  // which model each delegate is on.
   on('agent.spawn', async ($, e, next) => {
-    const spawned = await next(e)
     const backend = backendOfType(e.subagentType)
+    const leading = backend === undefined ? null : takeOptions(e.prompt)
+    const spawned = await next(
+      backend === undefined || leading === null || 'error' in leading
+        ? e
+        : { ...e, description: titleOf(backend, e.description, leading.model, leading.effort) },
+    )
     if (backend !== undefined && spawned.agentId !== undefined) {
       notOurs.delete(spawned.agentId)
       await $.state.set(
@@ -721,24 +755,50 @@ export const register: Register = on => {
     return yield* report($, e, e.agentId, await spawnOf($, e.agentId), failed(backend, `the plugin failed to run this turn (${why}).`))
   })
 
-  // A Bash call of a delegate is a row of its turn, or it is nothing: no command runs. A
-  // row is answered when the delegate has done something more, with that stretch of its log.
+  // A Bash call of a delegate is a row of its turn, or it is refused. A row runs the
+  // bridge's `wait` and nothing else, since this module wrote its command; one that cannot
+  // run is answered here. Either way it returns when the delegate has done something more,
+  // with that stretch of its log.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     if (e.agentId === undefined || (await delegateOf($, e.agentId)) === undefined) return next(e)
     const run = runs.get(e.agentId)
-    if (run === undefined || !run.rows.has(e.tool_use_id)) return { deny: 'A delegate runs no commands of its own.' }
+    const kind = run?.rows.get(e.tool_use_id)
+    if (run === undefined || kind === undefined) return { deny: 'A delegate runs no commands of its own.' }
     if (run.reportRow === e.tool_use_id && run.settled !== null && 'text' in run.settled && run.settled.text !== null) {
       return { result: { stdout: run.settled.text, stderr: '', interrupted: false } as never }
     }
     const onStop = () => stopRun(run)
     next.signal.addEventListener('abort', onStop, { once: true })
     try {
+      if (kind === 'run' && run.runsRows && !next.signal.aborted) {
+        await run.control?.follow()
+        const ran = await next(e)
+        const mark = /\[delegate\] (\w+) · next (\d+)\s*$/.exec('result' in ran ? (printed(ran.result) ?? '') : '')
+        if (mark !== null) {
+          run.offset = Number(mark[2])
+          if (mark[1] !== 'running') await settleSoon($, run, 5000)
+          return ran
+        }
+        // Refused, or it did not run as meant (plan mode, no node in that shell): the
+        // rows of this turn are answered here from now on.
+        run.runsRows = false
+      }
       const text = next.signal.aborted ? '' : await followRun($, run)
       return { result: { stdout: text, stderr: '', interrupted: false } as never }
     } finally {
       next.signal.removeEventListener('abort', onStop)
     }
   }).catch(async ($, e, next) => (e.agentId === undefined || (await delegateOf($, e.agentId)) === undefined ? next(e) : { deny: 'A delegate runs no commands of its own.' }))
+
+  // A row's command is allowed without asking: it is this module's own, and only reads the
+  // turn's record. Nothing else a delegate's loop might call Bash for is.
+  on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
+    if (e.agentId === undefined || (await delegateOf($, e.agentId)) === undefined) return next(e)
+    const kind = e.tool_use_id === undefined ? undefined : runs.get(e.agentId)?.rows.get(e.tool_use_id)
+    return kind === 'run'
+      ? { decision: 'allow' as const, reason: "The delegate plugin's own command, which waits for the delegate's next step." }
+      : { decision: 'deny' as const, reason: 'A delegate runs no commands of its own.' }
+  }).catch(($, e, next) => next(e))
 
   // Under the Agent or SendMessage row that started a delegate turn: who, and what it did last.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {

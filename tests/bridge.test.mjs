@@ -452,6 +452,20 @@ test("wait returns a turn's log from an offset on, and nothing more once it has 
   assert.equal(JSON.parse(ask("wait", "task-nosuch", "--from", "7").out).status, "unknown");
 });
 
+test("wait --text prints the log as it is and then where it got to, from a shell that is told where the records are", async () => {
+  const { events } = await runTurn({ backend: "codex", permission: "read-only" }, { env: { FAKE_CODEX_SCENARIO: "normal" } });
+  const { jobId, jobDir } = events.find((event) => event.type === "ready");
+  assert.ok(jobDir.startsWith(STATE.DELEGATE_STATE_DIR));
+  // As a row runs it: in another directory, with nothing in the environment that names the records.
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-elsewhere-"));
+  const run = spawnSync(process.execPath, [BRIDGE, "wait", jobId, "--from", "0", "--dir", jobDir, "--text"], { cwd: elsewhere, encoding: "utf8" });
+  fs.rmSync(elsewhere, { recursive: true, force: true });
+  assert.equal(run.status, 0);
+  assert.match(run.stdout, /^\[\d\d:\d\d:\d\d\] started codex with read-only\n[\s\S]*finished: completed\n\[delegate\] completed · next \d+\n$/);
+  const next = Number(/next (\d+)\n$/.exec(run.stdout)[1]);
+  assert.equal(ask("wait", jobId, "--from", String(next), "--text").out, `[delegate] completed · next ${next}`);
+});
+
 test("wait holds on while a turn runs, and returns once there is news", async () => {
   let waited = null;
   await runTurn(

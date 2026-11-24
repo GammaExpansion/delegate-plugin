@@ -72,6 +72,14 @@ function jobsDir(cwd) {
   return dir;
 }
 
+/** Where the records of `cwd`'s workspace are kept. */
+export const jobsDirOf = (cwd) => jobsDir(cwd);
+
+/** Reads `cwd`'s records from `dir`, for a caller that was told where they are. */
+export function pinJobsDir(cwd, dir) {
+  jobsDirs.set(path.resolve(cwd), dir);
+}
+
 const jobFile = (cwd, id) => path.join(jobsDir(cwd), `${id}.json`);
 const logFile = (cwd, id) => path.join(jobsDir(cwd), `${id}.log`);
 

@@ -11,10 +11,12 @@
 //                               the last lines of its log, as text
 //   bridge.mjs result [turn]    the full record of a turn (the last one that ended, when
 //                               none is named): its answer, what it did and what it cost
-//   bridge.mjs wait <turn> --from <offset>
+//   bridge.mjs wait <turn> --from <offset> [--dir <records>] [--text]
 //                               waits until the turn's log has something new, or the turn
 //                               is over, and prints { status, nextOffset, text } as JSON.
-//                               The hooks module shows each such stretch as a row.
+//                               With --text it prints that stretch of the log as it is,
+//                               and then one line, "[delegate] <status> · next <offset>".
+//                               That is the command a turn's rows run: one row, one wait.
 //
 // `run` keeps a record and a log of its turn on disk as it goes (lib/state.mjs), which is
 // what `status` and `result` read: while the turn runs, after it, and when it was stopped
@@ -31,7 +33,7 @@
 // it, or one not yet complete, is passed over.
 //
 // Events, one JSON object per line:
-//   { type: "ready", controlDir, token, jobId }   jobId names the turn's record
+//   { type: "ready", controlDir, token, jobId, jobDir }   the turn's record, and where records are kept
 //   { type: "event", event }                 a BackendEvent (see lib/backends/index.mjs)
 //   { type: "approval", id, request }        an ApprovalRequest; answer with answer-<id>.json
 //                                            holding { "token", "choice": "<id of one of request.choices>" },
@@ -50,7 +52,7 @@ import path from "node:path";
 
 import { BACKENDS, getBackend } from "./lib/backends/index.mjs";
 import { agentLabel, optionLabel, renderJobDetail, renderModels, renderReport, renderResult, renderSetup, renderStatusList } from "./lib/report.mjs";
-import { appendLog, findJob, finishJob, isActive, listJobs, newJobId, pruneJobs, readLogFrom, readLogTail, updateJob, writeJob } from "./lib/state.mjs";
+import { appendLog, findJob, finishJob, isActive, jobsDirOf, listJobs, newJobId, pinJobsDir, pruneJobs, readLogFrom, readLogTail, updateJob, writeJob } from "./lib/state.mjs";
 import { oneLine } from "./lib/text.mjs";
 
 const POLL_MS = 150;
@@ -202,7 +204,13 @@ async function cmdRun() {
   const log = (text) => record((id) => appendLog(request.cwd, id, text));
   log(`started ${backend.name} with ${optionLabel(request.permission, request.sandbox ?? null)}${request.resumeSessionId ? `, continuing session ${request.resumeSessionId}` : ""}`);
 
-  emit({ type: "ready", controlDir, token, jobId });
+  let jobDir = null;
+  try {
+    jobDir = jobId === null ? null : jobsDirOf(request.cwd);
+  } catch {
+    jobDir = null;
+  }
+  emit({ type: "ready", controlDir, token, jobId, jobDir });
 
   const startedAt = Date.now();
   let shown = { model: request.model ?? null, effort: null };
@@ -371,9 +379,12 @@ function settleMsFor(job) {
 }
 
 async function cmdWait([id, ...rest]) {
-  const fromAt = rest.indexOf("--from");
-  const from = Math.max(0, Number(fromAt === -1 ? 0 : rest[fromAt + 1]) || 0);
+  const valueOf = (name) => (rest.includes(name) ? rest[rest.indexOf(name) + 1] : undefined);
+  const from = Math.max(0, Number(valueOf("--from")) || 0);
+  const asText = rest.includes("--text");
   const cwd = process.cwd();
+  // A row's command is told where the records are: it runs in a shell that names no plugin data folder.
+  if (valueOf("--dir")) pinJobsDir(cwd, valueOf("--dir"));
   const maxMs = envMs("DELEGATE_ROW_MAX_MS", 90_000);
   const startedAt = Date.now();
   let newsAt = null;
@@ -386,12 +397,10 @@ async function cmdWait([id, ...rest]) {
     await sleep(200);
     found = findJob(cwd, id);
   }
-  if (!found) {
-    console.log(JSON.stringify({ status: "unknown", nextOffset: from, text: "" }));
-    return 0;
-  }
-  const { text, nextOffset } = readLogFrom(found.home, id, from);
-  console.log(JSON.stringify({ status: found.job.status, nextOffset, text }));
+  const status = found ? found.job.status : "unknown";
+  const { text, nextOffset } = found ? readLogFrom(found.home, id, from) : { text: "", nextOffset: from };
+  if (asText) process.stdout.write(`${text}[delegate] ${status} · next ${nextOffset}\n`);
+  else console.log(JSON.stringify({ status, nextOffset, text }));
   return 0;
 }
 

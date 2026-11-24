@@ -7,6 +7,14 @@
 //                               then closed. Events go out as JSON lines on stdout.
 //   bridge.mjs models [backend] the models each backend accepts, as text
 //   bridge.mjs setup            whether Node and each backend's CLI are ready, as text
+//   bridge.mjs status [turn]    the turns on record for this workspace, or one of them with
+//                               the last lines of its log, as text
+//   bridge.mjs result [turn]    the full record of a turn (the last one that ended, when
+//                               none is named): its answer, what it did and what it cost
+//
+// `run` keeps a record and a log of its turn on disk as it goes (lib/state.mjs), which is
+// what `status` and `result` read: while the turn runs, after it, and when it was stopped
+// before it could hand back a report.
 //
 // `run` and the module talk through a control directory the bridge makes for the turn and
 // names in its first event. Since stdin is closed, that is the way back: the module writes
@@ -19,7 +27,7 @@
 // it, or one not yet complete, is passed over.
 //
 // Events, one JSON object per line:
-//   { type: "ready", controlDir, token }
+//   { type: "ready", controlDir, token, jobId }   jobId names the turn's record
 //   { type: "event", event }                 a BackendEvent (see lib/backends/index.mjs)
 //   { type: "approval", id, request }        an ApprovalRequest; answer with answer-<id>.json
 //                                            holding { "token", "choice": "<id of one of request.choices>" },
@@ -33,7 +41,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { BACKENDS, getBackend } from "./lib/backends/index.mjs";
-import { renderModels, renderReport, renderSetup } from "./lib/report.mjs";
+import { agentLabel, optionLabel, renderJobDetail, renderModels, renderReport, renderResult, renderSetup, renderStatusList } from "./lib/report.mjs";
+import { appendLog, findJob, finishJob, isActive, listJobs, newJobId, pruneJobs, readLogTail, updateJob, writeJob } from "./lib/state.mjs";
+import { oneLine } from "./lib/text.mjs";
 
 const POLL_MS = 150;
 
@@ -119,12 +129,57 @@ async function cmdRun() {
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
-  emit({ type: "ready", controlDir, token });
+  // The turn's record. Keeping it never fails the turn: where it cannot be written, the
+  // turn runs without one.
+  let jobId = null;
+  const record = (work) => {
+    if (jobId === null) return;
+    try {
+      work(jobId);
+    } catch {
+      // Best effort.
+    }
+  };
+  try {
+    const job = writeJob(request.cwd, {
+      id: newJobId(),
+      backend: backend.name,
+      agent: agentLabel(backend, request.model ?? null, request.effort ?? null),
+      option: optionLabel(request.permission, request.sandbox ?? null),
+      mode: request.mode ?? null,
+      cwd: request.cwd,
+      task: request.prompt,
+      status: "running",
+      pid: process.pid,
+      createdAt: new Date().toISOString(),
+      sessionId: null
+    });
+    jobId = job.id;
+    pruneJobs(request.cwd);
+  } catch {
+    jobId = null;
+  }
+  const log = (text) => record((id) => appendLog(request.cwd, id, text));
+  log(`started ${backend.name} with ${optionLabel(request.permission, request.sandbox ?? null)}${request.resumeSessionId ? `, continuing session ${request.resumeSessionId}` : ""}`);
+
+  emit({ type: "ready", controlDir, token, jobId });
 
   const startedAt = Date.now();
   let shown = { model: request.model ?? null, effort: null };
   const onEvent = (event) => {
-    if (event.type === "session") shown = { model: event.model ?? shown.model, effort: event.effort ?? null };
+    if (event.type === "session") {
+      shown = { model: event.model ?? shown.model, effort: event.effort ?? null };
+      record((id) => updateJob(request.cwd, id, { sessionId: event.sessionId, agent: agentLabel(backend, shown.model, shown.effort) }));
+      log(`session ${event.sessionId}${event.model ? ` · model ${event.model}` : ""}${event.effort ? ` · effort ${event.effort}` : ""}`);
+    } else if (event.type === "action") {
+      const { kind, title, status, exitCode } = event.action;
+      const head = `${kind}${status ? ` ${status}` : ""}${exitCode === undefined || exitCode === null ? "" : ` (exit ${exitCode})`}: ${oneLine(title, 300)}`;
+      log(event.output ? `${head}\n${event.output}` : head);
+    } else if (event.type === "note") {
+      log(`note: ${event.text}`);
+    } else {
+      log(event.text);
+    }
     emit({ type: "event", event });
   };
   const onApproval =
@@ -133,7 +188,11 @@ async function cmdRun() {
           new Promise((resolve) => {
             if (controller.signal.aborted) return resolve(null);
             const id = nextId++;
-            pending.set(id, resolve);
+            pending.set(id, (answer) => {
+              log(`the user answered: ${answer === null ? "(no answer)" : typeof answer === "string" ? answer : "in their own words"}`);
+              resolve(answer);
+            });
+            log(`asked the user: ${ask.kind} ${oneLine(ask.title, 300)}`);
             emit({ type: "approval", id, request: ask });
           })
       : undefined;
@@ -181,8 +240,18 @@ async function cmdRun() {
     model: result.model ?? shown.model,
     effort: shown.effort,
     durationMs: Date.now() - startedAt,
+    jobId,
     result
   });
+  record((id) => {
+    updateJob(request.cwd, id, {
+      agent: agentLabel(backend, result.model ?? shown.model, shown.effort),
+      option: optionLabel(result.permission ?? request.permission, request.sandbox ?? null),
+      sessionId: result.sessionId ?? null
+    });
+    finishJob(request.cwd, id, result.status, { text: result.text, actions: result.actions, usage: result.usage, error: result.error, notes: result.notes });
+  });
+  log(`finished: ${result.status}${result.error ? ` · ${String(result.error).split("\n")[0]}` : ""}`);
   emit({ type: "result", result, report });
   return 0;
 }
@@ -215,6 +284,34 @@ async function cmdSetup() {
   return 0;
 }
 
+/** The turn `status` or `result` was asked about: by its id, or the newest that fits. */
+function pickJob(cwd, id, fits) {
+  if (id) {
+    const found = findJob(cwd, id);
+    if (!found) throw new Error(`No turn "${id}" is on record. \`status\` lists the turns of this workspace.`);
+    return found;
+  }
+  const job = listJobs(cwd).find(fits);
+  return job ? { job, home: cwd } : null;
+}
+
+function cmdStatus([id]) {
+  const cwd = process.cwd();
+  if (!id) {
+    console.log(renderStatusList(listJobs(cwd)));
+    return 0;
+  }
+  const { job, home } = pickJob(cwd, id);
+  console.log(renderJobDetail(job, readLogTail(home, job.id)));
+  return 0;
+}
+
+function cmdResult([id]) {
+  const picked = pickJob(process.cwd(), id, (job) => !isActive(job));
+  console.log(picked ? renderResult(picked.job) : "No delegate turn has ended in this workspace yet.");
+  return 0;
+}
+
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
   switch (command) {
@@ -224,8 +321,12 @@ async function main() {
       return cmdModels(argv);
     case "setup":
       return cmdSetup();
+    case "status":
+      return cmdStatus(argv);
+    case "result":
+      return cmdResult(argv);
     default:
-      throw new Error(`Unknown command "${command ?? ""}". Use run, models or setup.`);
+      throw new Error(`Unknown command "${command ?? ""}". Use run, models, setup, status or result.`);
   }
 }
 

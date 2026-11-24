@@ -366,6 +366,7 @@ async function bridgeText($: EngineInterface, args: string[]): Promise<string> {
   try {
     const run = await $.process.run(['node', `${$.plugin.root}/scripts/bridge.mjs`, ...args], {
       cwd: await $.session.cwd(),
+      env: await $.process.hookEnv().catch(() => ({})),
       timeoutMs: 120_000,
     })
     return run.stdout.trim() || run.stderr.trim() || `The bridge exited with code ${run.exitCode}.`
@@ -375,6 +376,9 @@ async function bridgeText($: EngineInterface, args: string[]): Promise<string> {
     return `The delegate plugin's bridge did not finish: ${message}.${hint}`
   }
 }
+
+/** A turn's id as an argument for the bridge, or none: ids are letters, digits and dashes. */
+const jobArg = (text: unknown): string[] => (typeof text === 'string' && /^[A-Za-z0-9-]+$/.test(text.trim()) ? [text.trim()] : [])
 
 const backendArg = (text: unknown): string[] => {
   const word = typeof text === 'string' ? text.trim().toLowerCase() : ''
@@ -406,6 +410,18 @@ export const register: Register = on => {
       name: 'setup',
       description: 'Checks that Node and the Codex and Antigravity CLIs are installed and signed in for the delegate plugin. Takes no arguments.',
       inputSchema: { type: 'object', properties: {} },
+    })
+    await $.tool.register({
+      name: 'status',
+      description:
+        "Lists the delegate turns on record for this workspace (id, agent, status, permission, time, task), newest first. With a turn's id, shows that turn and the last lines of its log: use it to see how far a running delegate has got, or what a stopped one did. The id is the last item of a report's headline.",
+      inputSchema: { type: 'object', properties: { turn: { type: 'string', description: "A turn's id, as in task-mwu2k58b3d42. All turns when left out." } } },
+    })
+    await $.tool.register({
+      name: 'result',
+      description:
+        "Prints the full record of a delegate turn: its answer, the session id, every action it took and its token usage. It works for a turn that was stopped or failed half-way, which handed back no report. Without an id, the turn that ended last in this workspace.",
+      inputSchema: { type: 'object', properties: { turn: { type: 'string', description: "A turn's id, as in task-mwu2k58b3d42. The last turn that ended when left out." } } },
     })
     return next(e)
   })
@@ -472,4 +488,14 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'mcp__delegate__setup' }, async $ => ({ result: await bridgeText($, ['setup']) }))
+
+  on('tool.call', { tool: 'mcp__delegate__status' }, async ($, e) => {
+    const input = e as unknown as { turn?: unknown }
+    return { result: await bridgeText($, ['status', ...jobArg(input.turn)]) }
+  })
+
+  on('tool.call', { tool: 'mcp__delegate__result' }, async ($, e) => {
+    const input = e as unknown as { turn?: unknown }
+    return { result: await bridgeText($, ['result', ...jobArg(input.turn)]) }
+  })
 }

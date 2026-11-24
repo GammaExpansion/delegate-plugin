@@ -64,9 +64,9 @@ Ask Codex what this repository does, in three sentences
 ### What it adds
 
 - Two subagent types, `delegate:codex` and `delegate:agy`.
-- Three commands: `/delegate:run`, `/delegate:setup` and `/delegate:models`.
+- Five commands: `/delegate:run`, `/delegate:status`, `/delegate:result`, `/delegate:setup` and `/delegate:models`.
 - One skill, `delegating-tasks`: when to delegate, how to brief a delegate, and how to handle its report.
-- Two tools Claude can call, `mcp__delegate__models` and `mcp__delegate__setup`.
+- Four tools Claude can call: `mcp__delegate__status` and `mcp__delegate__result` for the turns on record, `mcp__delegate__models` and `mcp__delegate__setup`.
 - A hooks module that runs the delegates, puts their requests to you, and shows their progress under the Agent row.
 
 ### Update or remove
@@ -134,10 +134,10 @@ While a delegate works, the line under its Agent row says who it is and what it 
 ⎿ Codex Agent (gpt-6.2-astra) · 12s · command completed (exit 0): cat src/auth.ts
 ```
 
-Its report is a headline, the backend's id for the conversation, any notes, what was declined, and then the delegate's answer as it gave it:
+Its report is a headline that ends with the turn's id, the backend's id for the conversation, any notes, what was declined, and then the delegate's answer as it gave it:
 
 ```text
-[delegate] Codex Agent (gpt-6.2-astra) · completed · 17.1s · read-only
+[delegate] Codex Agent (gpt-6.2-astra) · completed · 17.1s · read-only · task-mwukx33s0450
 session: 01a20c1b-54c6-7a83-a5a8-327fe26d1bc2
 declined (1):
 - [command] touch b.txt (declined)
@@ -145,6 +145,22 @@ note: the user was asked about these and did not allow them, or the delegate was
 
 I couldn't create b.txt because write permission was denied.
 ```
+
+### Turns on record
+
+Every turn is recorded as it runs: what it was asked, the option it ran with, its session, a log of what the delegate did, and at the end its answer, its actions and its token usage. The last 50 turns that ended are kept for each repository, in the plugin's data folder.
+
+```text
+/delegate:status
+TURN                AGENT                         STATUS      PERMISSION   TIME    TASK
+task-mwukx33s0450   Codex Agent (gpt-6.2-astra)   completed   read-only    24.5s   Run `git log --oneline -2` and report the two lines. Chan...
+```
+
+- `/delegate:status` lists the turns of this repository, newest first, turns that ran in its worktrees included. `/delegate:status <id>` shows one turn and the last lines of its log: how far a running delegate has got.
+- `/delegate:result <id>` prints a turn's full record. Without an id, the turn that ended last.
+- A turn that was stopped, or that failed half-way, hands back no report, but its record is kept: `result` shows what it had done and said by then, and its session id.
+
+Claude can call both as tools, so you can ask "how far is the Codex review?" or "what did the stopped run change?".
 
 ## Permissions
 
@@ -241,9 +257,9 @@ plugins/delegate/
 │   ├── permissions.ts   mode → option, and what a task may ask for
 │   └── options.ts       the options on a prompt's first line
 ├── scripts/
-│   ├── bridge.mjs       one turn per process; models and setup
-│   └── lib/             JSON-RPC client, the two backends, the report
-├── commands/            run, setup, models
+│   ├── bridge.mjs       one turn per process; status, result, models and setup
+│   └── lib/             JSON-RPC client, the two backends, the records of turns, the report
+├── commands/            run, status, result, setup, models
 ├── skills/              delegating-tasks
 ├── types/index.d.ts     the progress value the hooks keep in $.state
 └── tests/               the mod's own tests (claude plugin test)
@@ -298,7 +314,7 @@ Then add it to `hooks/agents.ts` (its agent type), `hooks/permissions.ts` (its o
 - Mods are an early-access part of Claude Code, and their API may change between releases.
 - In auto mode the report goes through Claude Code's internal hand-back tool, which is not part of the documented API.
 - A turn lives inside its subagent. Stopping the subagent, a reload or an update of the plugin, or quitting Claude Code ends the turn in flight, and a stopped turn hands back no report. The backend's session stays: continue it with SendMessage, or in a later Claude session with `--resume` and the id from an earlier report.
-- Nothing about a turn is kept on disk but its session id: there is no list of past runs, and a report is not saved as a file.
+- The records of turns are for looking, not for running: `status` and `result` show a turn, but nothing can take a stopped turn up where it left off, other than continuing its conversation.
 - In auto mode every report arrives under a note that the auto mode classifier was unavailable when reviewing the subagent's work. Claude Code reviews a subagent's report through its own model's reply, and a delegate's report is not written by that model, so there is nothing for it to review. The note is accurate: the delegate's work was not reviewed by Claude Code, and Claude is told to check it. The plugin cannot remove it; in other modes no such review runs and no note appears.
 - The subagent's panel names the placeholder model of the agent type (Haiku), not the backend's model. The report's headline names the real one.
 - Claude Code's question dialog always has a field for text; it cannot be left out.

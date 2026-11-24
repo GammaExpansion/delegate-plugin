@@ -47,7 +47,7 @@ type BackendEvent =
 type RunResult = { status: 'completed' | 'cancelled' | 'failed'; sessionId: string | null; model: string | null }
 
 type BridgeEvent =
-  | { type: 'ready'; controlDir: string; token: string }
+  | { type: 'ready'; controlDir: string; token: string; jobId: string | null }
   | { type: 'event'; event: BackendEvent }
   | { type: 'approval'; id: number; request: ApprovalRequest }
   | { type: 'result'; result: RunResult; report: string }
@@ -90,6 +90,8 @@ export async function runTurn($: EngineInterface, request: TurnRequest, hooks: T
   const stream = $.process.spawn({
     argv: ['node', `${$.plugin.root}/scripts/bridge.mjs`, 'run'],
     cwd: request.cwd,
+    // Names the plugin's data folder, where the bridge keeps its records of turns.
+    env: await $.process.hookEnv().catch(() => ({})),
     input: JSON.stringify(request),
   })
   const outcome: TurnOutcome = { report: null, status: null, error: null }

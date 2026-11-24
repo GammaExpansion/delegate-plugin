@@ -3,7 +3,7 @@
 // lines, and answers and cancels through its control directory.
 // Run from the repository root with: node --test
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +17,15 @@ const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "delegate-
 writeFakeBin(scratch, "codex", fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url)));
 writeFakeBin(scratch, "agy", fileURLToPath(new URL("./fixtures/fake-agy.mjs", import.meta.url)));
 
+// The records of the turns these tests run go to a directory of their own.
+const STATE = { DELEGATE_STATE_DIR: path.join(scratch, "state") };
+
+/** What `bridge.mjs status` or `result` prints here. */
+function ask(command, ...args) {
+  const run = spawnSync(process.execPath, [BRIDGE, command, ...args], { cwd: scratch, env: { ...process.env, ...STATE }, encoding: "utf8" });
+  return { code: run.status, out: run.stdout.trim(), err: run.stderr.trim() };
+}
+
 /**
  * Runs one turn. `onEvent(event, child)` sees every event as it comes and may answer an
  * approval or cancel through the control directory.
@@ -24,7 +33,7 @@ writeFakeBin(scratch, "agy", fileURLToPath(new URL("./fixtures/fake-agy.mjs", im
 function runTurn(request, { env = {}, onEvent = () => {} } = {}) {
   const child = spawn(process.execPath, [BRIDGE, "run"], {
     cwd: scratch,
-    env: { ...prependPath(process.env, scratch), ...env },
+    env: { ...prependPath(process.env, scratch), ...STATE, ...env },
     stdio: ["pipe", "pipe", "pipe"]
   });
   child.stdin.end(JSON.stringify({ cwd: scratch, prompt: "do the thing", approvals: "decline", ...request }));
@@ -57,7 +66,7 @@ test("a turn ends with a result and a report, and the control directory is gone"
   assert.equal(result.result.status, "completed");
   assert.equal(result.result.sessionId, "thread-main");
   // The session's id is under the headline: it is what --resume takes to continue it later.
-  assert.match(result.report, /^\[delegate\] Codex Agent \(fake-model xHigh\) · completed · \d+\.\ds · read-only\nsession: thread-main\n\nall done$/);
+  assert.match(result.report, /^\[delegate\] Codex Agent \(fake-model xHigh\) · completed · \d+\.\ds · read-only · task-[a-z0-9]+\nsession: thread-main\n\nall done$/);
   assert.ok(events.some((event) => event.type === "event" && event.event.type === "session"));
   assert.equal(fs.existsSync(controlDir), false);
 });
@@ -219,7 +228,7 @@ test("a turn without the sandbox opens Codex with none, and the headline says so
   );
   const opened = fs.readFileSync(record, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(opened.map(({ method, sandbox }) => ({ method, sandbox })), [{ method: "thread/start", sandbox: "danger-full-access" }]);
-  assert.match(result.report, /· ask-for-approval, no sandbox\n/);
+  assert.match(result.report, /· ask-for-approval, no sandbox · task-[a-z0-9]+\n/);
 });
 
 test("a request the bridge cannot read is reported as an error event", async () => {
@@ -318,7 +327,7 @@ test("a session the turn names itself must be there: the turn fails and no new s
     { env: { FAKE_CODEX_SCENARIO: "normal", FAKE_CODEX_RESUME_FAILS: "1", FAKE_CODEX_RECORD: record } }
   );
   assert.equal(codex.result.result.status, "failed");
-  assert.match(codex.result.report, /^\[delegate\] Codex Agent · failed · \d+\.\ds · read-only\nerror: Codex could not resume session gone-thread: no rollout found for thread$/);
+  assert.match(codex.result.report, /^\[delegate\] Codex Agent · failed · \d+\.\ds · read-only · task-[a-z0-9]+\nerror: Codex could not resume session gone-thread: no rollout found for thread$/);
   assert.equal(fs.existsSync(record), false, "no thread was opened");
   assert.ok(!codex.events.some((event) => event.type === "event" && event.event.type === "session"));
 
@@ -363,14 +372,70 @@ test("agy: where it refuses its auto mode, the turn runs with accept-edits, and 
     { env: { FAKE_AGY_SCENARIO: "late-close", FAKE_AGY_NO_AUTO: "1" } }
   );
   assert.equal(result.result.status, "completed");
-  assert.match(result.report, /^\[delegate\] Gemini Agent \(fake-gemini\) · completed · \d+\.\ds · accept-edits\n/);
+  assert.match(result.report, /^\[delegate\] Gemini Agent \(fake-gemini\) · completed · \d+\.\ds · accept-edits · task-[a-z0-9]+\n/);
   assert.match(result.report, /note: agy does not offer its auto mode here \(Auto mode is not available: it needs the OS terminal sandbox\), so this turn ran with accept-edits/);
 });
 
 test("agy: auto cannot run without its sandbox, and a turn that fails without a word ends at its error", async () => {
   const { result } = await runTurn({ backend: "agy", permission: "auto", sandbox: "disabled" });
   assert.equal(result.result.status, "failed");
-  assert.match(result.report, /^\[delegate\] Gemini Agent · failed · \d+\.\ds · auto, no sandbox\nerror: Antigravity's "auto" runs its commands in agy's sandbox, so it cannot run with --sandbox disabled\. Pick another --permission\.$/);
+  assert.match(result.report, /^\[delegate\] Gemini Agent · failed · \d+\.\ds · auto, no sandbox · task-[a-z0-9]+\nerror: Antigravity's "auto" runs its commands in agy's sandbox, so it cannot run with --sandbox disabled\. Pick another --permission\.$/);
+});
+
+test("a turn is on record: status lists it and shows its log, result prints its answer, actions and usage", async () => {
+  const { result, events } = await runTurn(
+    { backend: "codex", permission: "read-only", approvals: "ask" },
+    { env: { FAKE_CODEX_SCENARIO: "approval" }, onEvent: (event, ctx) => event.type === "approval" && answer(ctx, event.id, { choice: "accept" }) }
+  );
+  const id = events.find((event) => event.type === "ready").jobId;
+  assert.match(id, /^task-[a-z0-9]+$/);
+  assert.ok(result.report.split("\n")[0].endsWith(` · ${id}`), "the report's headline ends with the turn's id");
+
+  const list = ask("status");
+  assert.equal(list.code, 0);
+  assert.match(list.out, /^TURN\s+AGENT\s+STATUS\s+PERMISSION\s+TIME\s+TASK\n/);
+  assert.match(list.out, new RegExp(`${id}\\s+Codex Agent \\(fake-model xHigh\\)\\s+completed\\s+read-only\\s+\\S+\\s+do the thing`));
+
+  const detail = ask("status", id);
+  assert.match(detail.out, new RegExp(`^\\[delegate\\] Codex Agent \\(fake-model xHigh\\) · completed · \\S+ · read-only · ${id}\ntask: do the thing\n`));
+  assert.match(detail.out, /--- recent activity ---\n\[\d\d:\d\d:\d\d\] started codex with read-only\n/);
+  assert.match(detail.out, /asked the user: command touch b\.txt/);
+  assert.match(detail.out, /the user answered: accept/);
+  assert.match(detail.out, /finished: completed\n\nFinished\. Its full record: result task-/);
+
+  const full = ask("result", id);
+  assert.match(full.out, /session: thread-main {2}\(continue this conversation from a new delegate with --resume thread-main\)/);
+  assert.match(full.out, /--- final message ---\nthe answer was accept/);
+  // Without an id, the turn that ended last.
+  assert.equal(ask("result").out, full.out);
+  assert.match(ask("status", "task-nosuch").err, /No turn "task-nosuch" is on record/);
+});
+
+test("a turn that was stopped is on record with what it had done", async () => {
+  const { events } = await runTurn(
+    { backend: "agy", permission: "default", approvals: "ask" },
+    { env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" }, onEvent: (event, ctx) => event.type === "approval" && cancel(ctx) }
+  );
+  const id = events.find((event) => event.type === "ready").jobId;
+  const full = ask("result", id);
+  assert.match(full.out, /· cancelled · /);
+  assert.match(full.out, /note: the run was stopped before it finished\./);
+  assert.match(full.out, /--- actions \(1\) ---\n- \[execute\] npm test/);
+});
+
+test("a turn whose bridge was killed is on record as failed, not as running for ever", async () => {
+  let id = null;
+  await runTurn(
+    { backend: "agy", permission: "default", approvals: "ask" },
+    {
+      env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
+      onEvent: (event, ctx) => {
+        if (event.type === "ready") id = event.jobId;
+        if (event.type === "approval") ctx.child.kill("SIGKILL");
+      }
+    }
+  );
+  assert.match(ask("status", id).out, /· failed · [^\n]*\n[\s\S]*error: The turn's process ended without recording a result/);
 });
 
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));

@@ -3,9 +3,10 @@
 // The agent types delegate:codex and delegate:agy are ordinary subagents to Claude Code:
 // Claude starts them with the Agent tool, continues them with SendMessage, runs them in
 // the background or in a worktree, and stops them, all as it does any subagent. Their
-// model is never called. Every model request of their loops is answered here: the turn
-// goes to the backend through scripts/bridge.mjs, and the backend's answer comes back as
-// the subagent's report.
+// model does none of the work. The model requests of their loops are answered here: the
+// turn goes to the backend through scripts/bridge.mjs, and the backend's answer comes back
+// as the subagent's report. In auto mode the model is asked once per turn, to make the call
+// that hands the report back, so that Claude Code's review of a subagent's work covers it.
 //
 // A turn runs on between the steps of its subagent's loop (Run, below). While it does,
 // each step is answered with a row: a Bash call written here, answered here, that runs no
@@ -81,6 +82,10 @@ const CONVERSATIONS_KEPT = 200
 // A turn that nothing has followed for this long is stopped by its bridge. A row follows it
 // when it starts, and no row lasts longer than a minute and a half.
 const LEASE_SEC = 240
+// The longest report the model is asked to hand back. Claude Code shows a model only the
+// start of a long tool result and keeps the rest in a file, so a longer report could not be
+// copied; and copying costs the model as many tokens again as the report has.
+const REVIEWED_AT_MOST = 20_000
 // How much of the log one row's result holds.
 const ROW_TEXT_AT_MOST = 6000
 const conversationKey = (agentId: string) => `conversation:${agentId}`
@@ -506,14 +511,6 @@ async function followRun($: EngineInterface, run: Run): Promise<string> {
 
 type StepNext = ((e: TurnStepInput) => AsyncGenerator<TurnStepChunk, TurnStepResult>) & { readonly signal: AbortSignal }
 
-// EXPERIMENT: what became of each hand-back, for the test of the reviewed hand-back.
-const EXPERIMENT_LOG = '/tmp/claude-0/-home-user-delegate-plugin/9b3274c6-b3fd-5aa1-a48e-4e392a2c57e4/scratchpad/handback.log'
-const experimentLines: string[] = []
-async function experimentLog($: EngineInterface, line: string): Promise<void> {
-  experimentLines.push(`${new Date().toISOString()} ${line}`)
-  await $.fs.write(EXPERIMENT_LOG, `${experimentLines.join('\n')}\n`).catch(() => {})
-}
-
 /**
  * Hands the report back by a call of the model's own. In auto mode Claude Code reviews a
  * subagent's work through the model's reply that hands it back; a call this plugin writes
@@ -523,10 +520,9 @@ async function experimentLog($: EngineInterface, line: string): Promise<void> {
  * whole. Only a hand-back of the report as it is goes out; anything else is dropped, and
  * the plugin hands the report back itself, as before.
  */
-async function* reviewedHandBack($: EngineInterface, e: TurnStepInput, next: StepNext, agentId: string, text: string) {
-  const startedAt = Date.now()
-  let why = 'the model did not answer'
+async function* reviewedHandBack($: EngineInterface, e: TurnStepInput, next: StepNext, text: string) {
   try {
+    // Copying needs no thought, so the least effort will do.
     const inner = next({ ...e, effort: 'low' })
     const chunks: TurnStepChunk[] = []
     let result: TurnStepResult
@@ -541,20 +537,13 @@ async function* reviewedHandBack($: EngineInterface, e: TurnStepInput, next: Ste
     const use = result.toolUses.length === 1 ? result.toolUses[0] : undefined
     const message = use?.name === 'SubagentHandback' ? (use.input as { message?: unknown } | null)?.message : undefined
     const call = chunks.find(chunk => chunk.kind === 'tool')
-    const usage = JSON.stringify(result.usage ?? null)
     if (typeof message === 'string' && message.trim() === text.trim() && call !== undefined && call.kind === 'tool') {
       await setTurn($, e.turnId, { handBackId: call.id, report: text })
-      await experimentLog($, `reviewed agent=${agentId} chars=${text.length} ms=${Date.now() - startedAt} usage=${usage}`)
       for (const chunk of chunks) yield chunk
       return result
     }
-    why =
-      typeof message === 'string'
-        ? `the copy differs (${message.length} chars for ${text.length})`
-        : `no hand-back call (stop=${result.stopReason}, tools=${result.toolUses.map(tool => tool.name).join(',') || 'none'}, said=${JSON.stringify(result.answer.slice(0, 160))})`
-    await experimentLog($, `fallback agent=${agentId} chars=${text.length} ms=${Date.now() - startedAt} usage=${usage}: ${why}`)
-  } catch (error) {
-    await experimentLog($, `fallback agent=${agentId} chars=${text.length} ms=${Date.now() - startedAt}: threw ${String(error)}`)
+  } catch {
+    // The model could not be asked: the report goes back all the same.
   }
   return yield* handBack(e, text, id => void setTurn($, e.turnId, { handBackId: id, report: text }).catch(() => {}))
 }
@@ -608,6 +597,11 @@ async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: stri
     await setTurn($, e.turnId, { handBackId: null, report: text })
     return yield* say(e, text)
   }
+  if (text.length > REVIEWED_AT_MOST) {
+    // Too long for the model to be shown whole: the plugin hands it back itself.
+    runs.delete(agentId)
+    return yield* handBack(e, text, id => void setTurn($, e.turnId, { handBackId: id, report: text }).catch(() => {}))
+  }
   if (run.reportRow === null) {
     // One last row, whose result is the report: that is where the model reads it from.
     const done = run
@@ -617,7 +611,7 @@ async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: stri
     })
   }
   runs.delete(agentId)
-  return yield* reviewedHandBack($, e, next, agentId, text)
+  return yield* reviewedHandBack($, e, next, text)
 }
 
 /** Runs the bridge for a listing or a check, and returns what it printed. */
@@ -646,12 +640,12 @@ const backendArg = (text: unknown): string[] => {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    // The model of these agents is never called. Their list holds Bash, because the rows a
-    // turn is shown as are Bash calls, which this module writes and answers itself (the
-    // tool.call hook below): no command of a delegate's ever runs, its own or one the
-    // placeholder model would write if this plugin failed to answer a step. Glob, which
-    // lists file names, is there so that the list never comes to nothing. The hand-back
-    // tool is added by Claude Code itself and cannot be listed.
+    // The model of these agents is called for one thing: in auto mode, to hand a finished
+    // report back (reviewedHandBack). Their list holds Bash, because the rows a turn is
+    // shown as are Bash calls, which this module writes and answers itself (the tool.call
+    // hook below): no command of a delegate's ever runs, its own or one the model would
+    // write. Glob, which lists file names, is there so that the list never comes to
+    // nothing. The hand-back tool is added by Claude Code itself and cannot be listed.
     for (const backend of BACKENDS) {
       await $.agent.register({ ...AGENT_SPECS[backend], model: 'sonnet', omitClaudeMd: true, tools: ['Glob', 'Bash'] })
     }

@@ -22,8 +22,9 @@ const SHARED = (who: string, idHint: string) =>
     `One instance is one conversation with ${who}: continue it with SendMessage to follow up or to answer a question it asked, and start several to run several side by side.`,
     `${who} sees only the prompt, never this conversation: give it the goal, the paths, what is already known, what must not change, and what to return.`,
     `To pick a model, put --model <id> on the prompt's first line (${idHint}); the delegate models tool lists the ids. Left out, ${who} uses its own default, and a continued conversation keeps the model it had.`,
+    `Every report has a "session:" line, the id of the conversation on ${who}'s side. To go on with a conversation from an earlier Claude session, start a new instance with --resume <that id> on the first line; write it only when the user or the project's notes give the id. A first line with an option the plugin does not know is refused.`,
     `What ${who} may do follows this conversation's permission mode: in default and accept-edits mode the user is asked about anything more, and in other modes it is declined and listed in the report. Only when the user asks for it, the first line may also carry --permission <option> and --sandbox enabled|disabled: less than the mode gives is taken as it is, more only once the user allows it in a question, for that turn.`,
-    `The result is ${who}'s report: a headline with the model, outcome and permission, anything declined, then its answer. It is another model's work: weigh it and check it against the code.`,
+    `The result is ${who}'s report: a headline with the model, outcome and permission, its session id, anything declined, then its answer. It is another model's work: weigh it and check it against the code.`,
   ].join(' ')
 
 const FALLBACK_PROMPT = [

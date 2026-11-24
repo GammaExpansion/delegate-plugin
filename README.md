@@ -15,7 +15,7 @@ The plugin stores no credentials. It uses the login and configuration each CLI a
 
 ### What you need
 
-- Claude Code with mods (plugins with a hooks module). This version was tested with Claude Code 2.1.330.
+- Claude Code with mods (plugins with a hooks module). This version was tested with Claude Code 2.1.331.
 - Node.js 18.18 or later on `PATH`.
 - At least one of the two agent CLIs, installed and signed in (or set up with an API key):
 
@@ -64,9 +64,9 @@ Ask Codex what this repository does, in three sentences
 ### What it adds
 
 - Two subagent types, `delegate:codex` and `delegate:agy`.
-- Three commands: `/delegate:run`, `/delegate:setup` and `/delegate:models`.
+- Five commands: `/delegate:run`, `/delegate:status`, `/delegate:result`, `/delegate:setup` and `/delegate:models`.
 - One skill, `delegating-tasks`: when to delegate, how to brief a delegate, and how to handle its report.
-- Two tools Claude can call, `mcp__delegate__models` and `mcp__delegate__setup`.
+- Four tools Claude can call: `mcp__delegate__status` and `mcp__delegate__result` for the turns on record, `mcp__delegate__models` and `mcp__delegate__setup`.
 - A hooks module that runs the delegates, puts their requests to you, and shows their progress under the Agent row.
 
 ### Update or remove
@@ -114,12 +114,17 @@ A prompt may carry options on its first line, before the task. Claude writes the
 | `--effort <level>`                 | Codex's reasoning effort. An Antigravity id carries its thinking level, as in `gemini-4-argon-high`. |
 | `--permission <option>`            | Another permission option than the mode gives, for this turn. See [Asking for more or less](#asking-for-more-or-less). |
 | `--sandbox enabled` or `disabled`  | Another sandbox than the option has, for this turn.                                            |
+| `--resume <session id>`            | Continue a backend session by its id, from a new subagent. See [Conversations](#conversations). |
+
+An option on the first line that is not in this table is an error, and nothing is started: a misspelt option, or one from an earlier version such as `--brief-file`, is not handed to the delegate as part of its task.
 
 `--worktree` on `/delegate:run` is for Claude: it starts the subagent with Claude Code's worktree isolation.
 
 ### Conversations
 
 One subagent is one conversation with the backend. Claude continues it with SendMessage, and the backend remembers the whole conversation. Several can run side by side, in the foreground or the background. Each subagent's backend session is kept in the plugin's store, so continuing the subagent continues the same backend session.
+
+Every report prints the backend's own id for the conversation, as `session: <id>` under the headline. That id outlives the Claude session: in a later one, start a new delegate with `--resume <id>` on the first line and it continues that conversation; follow-ups then go by SendMessage as usual. Keep the id if a conversation is meant to last, for example a reviewer that should remember earlier rounds. A session named this way must be there: if the backend cannot load it, the turn fails with the backend's own message and no new session is started. One subagent is one conversation, so a different `--resume` sent to a subagent that already has one is refused. With `--resume` and no `--model`, the backend picks the model.
 
 ### Progress and reports
 
@@ -129,16 +134,33 @@ While a delegate works, the line under its Agent row says who it is and what it 
 ⎿ Codex Agent (gpt-6.2-astra) · 12s · command completed (exit 0): cat src/auth.ts
 ```
 
-Its report is a headline, any notes, what was declined, and then the delegate's answer as it gave it:
+Its report is a headline that ends with the turn's id, the backend's id for the conversation, any notes, what was declined, and then the delegate's answer as it gave it:
 
 ```text
-[delegate] Codex Agent (gpt-6.2-astra) · completed · 17.1s · read-only
+[delegate] Codex Agent (gpt-6.2-astra) · completed · 17.1s · read-only · task-mwukx33s0450
+session: 01a20c1b-54c6-7a83-a5a8-327fe26d1bc2
 declined (1):
 - [command] touch b.txt (declined)
 note: the user was asked about these and did not allow them, or the delegate was stopped before an answer came.
 
 I couldn't create b.txt because write permission was denied.
 ```
+
+### Turns on record
+
+Every turn is recorded as it runs: what it was asked, the option it ran with, its session, a log of what the delegate did, and at the end its answer, its actions and its token usage. The last 50 turns that ended are kept for each repository, in the plugin's data folder.
+
+```text
+/delegate:status
+TURN                AGENT                         STATUS      PERMISSION   TIME    TASK
+task-mwukx33s0450   Codex Agent (gpt-6.2-astra)   completed   read-only    24.5s   Run `git log --oneline -2` and report the two lines. Chan...
+```
+
+- `/delegate:status` lists the turns of this repository, newest first, turns that ran in its worktrees included. `/delegate:status <id>` shows one turn and the last lines of its log: how far a running delegate has got.
+- `/delegate:result <id>` prints a turn's full record. Without an id, the turn that ended last.
+- A turn that was stopped, or that failed half-way, hands back no report, but its record is kept: `result` shows what it had done and said by then, and its session id.
+
+Claude can call both as tools, so you can ask "how far is the Codex review?" or "what did the stopped run change?".
 
 ## Permissions
 
@@ -235,9 +257,9 @@ plugins/delegate/
 │   ├── permissions.ts   mode → option, and what a task may ask for
 │   └── options.ts       the options on a prompt's first line
 ├── scripts/
-│   ├── bridge.mjs       one turn per process; models and setup
-│   └── lib/             JSON-RPC client, the two backends, the report
-├── commands/            run, setup, models
+│   ├── bridge.mjs       one turn per process; status, result, models and setup
+│   └── lib/             JSON-RPC client, the two backends, the records of turns, the report
+├── commands/            run, status, result, setup, models
 ├── skills/              delegating-tasks
 ├── types/index.d.ts     the progress value the hooks keep in $.state
 └── tests/               the mod's own tests (claude plugin test)
@@ -250,6 +272,10 @@ To see what a backend really sent, set `DELEGATE_TRACE=1` where Claude Code star
 ### A delegate is a native subagent
 
 Earlier versions had a forwarding subagent run a script in a loop: start a job, wait on it in short calls, read the answer from a file. Every step was a model call, and background runs, follow-ups, stopping and worktrees each needed machinery of their own. Now Claude Code's own subagent does all of that, and the plugin answers for the subagent's model. No model sits between Claude and the delegate.
+
+### A long turn says it is alive
+
+The plugin answers a subagent's model request only when the backend's turn is over, and Claude Code ends a background subagent whose request has been silent for ten minutes. So while the backend works, or waits for your answer to a question, the plugin's answer carries one line of thinking a minute: what the delegate did last, and for how long it has run. Claude Code shows such thinking and does not record it, so the report is the same as it would be without it. A turn can therefore take as long as the backend takes.
 
 ### Permissions follow the mode, and more needs your pick
 
@@ -287,6 +313,8 @@ Then add it to `hooks/agents.ts` (its agent type), `hooks/permissions.ts` (its o
 
 - Mods are an early-access part of Claude Code, and their API may change between releases.
 - In auto mode the report goes through Claude Code's internal hand-back tool, which is not part of the documented API.
+- A turn lives inside its subagent. Stopping the subagent, a reload or an update of the plugin, or quitting Claude Code ends the turn in flight, and a stopped turn hands back no report. The backend's session stays: continue it with SendMessage, or in a later Claude session with `--resume` and the id from an earlier report.
+- The records of turns are for looking, not for running: `status` and `result` show a turn, but nothing can take a stopped turn up where it left off, other than continuing its conversation.
 - In auto mode every report arrives under a note that the auto mode classifier was unavailable when reviewing the subagent's work. Claude Code reviews a subagent's report through its own model's reply, and a delegate's report is not written by that model, so there is nothing for it to review. The note is accurate: the delegate's work was not reviewed by Claude Code, and Claude is told to check it. The plugin cannot remove it; in other modes no such review runs and no note appears.
 - The subagent's panel names the placeholder model of the agent type (Haiku), not the backend's model. The report's headline names the real one.
 - Claude Code's question dialog always has a field for text; it cannot be left out.

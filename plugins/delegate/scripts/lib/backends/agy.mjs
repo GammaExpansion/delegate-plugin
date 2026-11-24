@@ -267,7 +267,7 @@ export const agyBackend = {
    * @param {import("./index.mjs").RunOptions} options
    * @returns {Promise<import("./index.mjs").RunResult>}
    */
-  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent, onApproval }) {
+  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, resumeNamed, signal, traceFile, onEvent, onApproval }) {
     const { permission: askedPermission, settings: policy } = settingsFor({ permission, sandbox });
     // The option the turn really runs with: another one where agy refuses auto.
     let permissionName = askedPermission;
@@ -471,6 +471,8 @@ export const agyBackend = {
           lastActivityAt = Date.now();
           sessionId = opened?.sessionId ?? resumeSessionId;
         } catch (error) {
+          // A session the caller named is the whole point of the turn: without it, nothing runs.
+          if (resumeNamed) throw new Error(`agy could not resume session ${resumeSessionId}: ${error?.message ?? error}`);
           // A conversation whose session is gone goes on in a new one rather than failing
           // every turn from here on.
           replaying = false;

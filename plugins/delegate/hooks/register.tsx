@@ -16,7 +16,7 @@
 import type { EngineInterface, Register, TurnStepInput } from 'claude-code'
 import type { Progress, SpawnRecord, TurnRecord } from '../types'
 import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './agents'
-import { endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
+import { alive, endTurn, handBack, handBackFailed, latestMessage, say } from './answer'
 import { oneLine, runTurn, type ApprovalAnswer, type ApprovalRequest } from './bridge'
 import { takeOptions } from './options'
 import { askedFor, describe, grantFor, type Backend, type Grant } from './permissions'
@@ -26,6 +26,8 @@ type Conversation = { backend: Backend; sessionId: string; model: string | null;
 
 /** Agents found not to be delegates, so that their steps are passed on without a lookup. */
 const notOurs = new Set<string>()
+// The turns whose step has given a sign of life: their report goes in the block after it.
+const beaten = new Set<string>()
 /**
  * Whether a delegate's run was offered the hand-back tool, by agent, where Claude Code asked
  * about it. Outside auto mode the tool is not on a subagent's list at all, and nothing is
@@ -35,6 +37,8 @@ const notOurs = new Set<string>()
 const handBackOffered = new Map<string, boolean>()
 
 const CONVERSATIONS_KEPT = 200
+// How often a delegate's step gives a sign of life while its backend works.
+const HEARTBEAT_MS = 60_000
 const conversationKey = (agentId: string) => `conversation:${agentId}`
 
 /** How much of what a delegate asks to do is shown; anything longer can only be declined. */
@@ -214,11 +218,12 @@ async function confirmWider(
   return base
 }
 
-/** The report with lines added under its headline. */
+/** The report with lines added under its headline and its session line. */
 function withNotes(report: string, notes: string[]): string {
   if (notes.length === 0) return report
-  const [headline = '', ...rest] = report.split('\n')
-  return [headline, ...notes.map(line => `note: ${line}`), ...rest].join('\n')
+  const lines = report.split('\n')
+  const at = lines[1]?.startsWith('session: ') ? 2 : 1
+  return [...lines.slice(0, at), ...notes.map(line => `note: ${line}`), ...lines.slice(at)].join('\n')
 }
 
 /** Runs one turn of a delegate on its backend and returns the report, or null if it was stopped. */
@@ -228,9 +233,15 @@ async function runDelegate(
   backend: Backend,
   spawn: SpawnRecord | undefined,
   signal: AbortSignal,
+  onLine: (line: string) => void,
 ): Promise<string | null> {
   const leading = takeOptions(await latestMessage($, agentId))
+  if ('error' in leading) return failed(backend, leading.error)
   if (leading.task === '') return failed(backend, 'the prompt holds no task.')
+  const before = await loadConversation($, agentId)
+  if (leading.resume !== null && before !== undefined && before.sessionId !== leading.resume) {
+    return failed(backend, `this delegate already has a conversation (session ${before.sessionId}), and one delegate is one conversation. Start a new delegate with --resume ${leading.resume} to continue that one.`)
+  }
   const notes: string[] = []
   let grant = grantFor(backend, spawn?.mode ?? undefined)
   if (leading.permission !== null || leading.sandbox !== null) {
@@ -239,7 +250,6 @@ async function runDelegate(
     grant = asked.wider ? await confirmWider($, backend, leading.task, grant, asked.grant, line => notes.push(line)) : asked.grant
   }
 
-  const before = await loadConversation($, agentId)
   const model = leading.model ?? before?.model ?? null
   const effort = leading.effort ?? before?.effort ?? null
   const info = (await $.agent.list()).find(agent => agent.id === agentId)
@@ -251,6 +261,7 @@ async function runDelegate(
   const startedAt = Date.now()
   let label = labelOf(backend, model, null)
   const show = (status: Progress['status'], line: string) => {
+    onLine(line)
     if (spawn === undefined) return
     const value: Progress = { agent: label, status, line, startedAt, endedAt: status === 'running' ? null : Date.now() }
     $.state.set({ plugin: 'delegate', key: 'progress', id: spawn.rowId }, value).catch(() => {})
@@ -269,7 +280,8 @@ async function runDelegate(
       mode: grant.mode,
       model,
       effort,
-      resumeSessionId: before?.sessionId ?? null,
+      resumeSessionId: leading.resume ?? before?.sessionId ?? null,
+      resumeNamed: leading.resume !== null,
     },
     {
       onSession: async (sessionId, usedModel, usedEffort) => {
@@ -304,11 +316,12 @@ function handsBack(agentId: string, spawn: SpawnRecord | undefined): boolean {
 
 /** Gives the report: through the hand-back tool where the run is offered it, else as words. */
 async function* report($: EngineInterface, e: TurnStepInput, agentId: string, spawn: SpawnRecord | undefined, text: string) {
+  const index = beaten.delete(e.turnId) ? 1 : 0
   if (!handsBack(agentId, spawn)) {
     await setTurn($, e.turnId, { handBackId: null, report: text })
-    return yield* say(e, text)
+    return yield* say(e, text, index)
   }
-  return yield* handBack(e, text, id => void setTurn($, e.turnId, { handBackId: id, report: text }).catch(() => {}))
+  return yield* handBack(e, text, id => void setTurn($, e.turnId, { handBackId: id, report: text }).catch(() => {}), index)
 }
 
 async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: string, backend: Backend, signal: AbortSignal) {
@@ -324,9 +337,28 @@ async function* delegateStep($: EngineInterface, e: TurnStepInput, agentId: stri
   }
   await setTurn($, e.turnId, { handBackId: null, report: null })
   const spawn = await awaitSpawn($, agentId)
-  const text = await runDelegate($, agentId, backend, spawn, signal)
-  if (text === null) return yield* endTurn(e)
-  return yield* report($, e, agentId, spawn, text)
+  // The backend's turn, or the user's answer to a question, can take longer than Claude
+  // Code lets a model request stay silent. So while it runs, the step says what the
+  // delegate did last, once a minute.
+  const startedAt = Date.now()
+  let line = 'starting'
+  const run = runDelegate($, agentId, backend, spawn, signal, latest => (line = latest)).then(
+    text => ({ text }),
+    (error: unknown) => ({ error }),
+  )
+  for (;;) {
+    const settled = await Promise.race([run, $.clock.sleep(HEARTBEAT_MS).then(() => null)])
+    if (settled !== null) {
+      if ('error' in settled) throw settled.error
+      if (settled.text === null) {
+        beaten.delete(e.turnId)
+        return yield* endTurn(e)
+      }
+      return yield* report($, e, agentId, spawn, settled.text)
+    }
+    beaten.add(e.turnId)
+    yield alive(`${AGENT_NAME[backend]}: ${line} · ${elapsed(Date.now() - startedAt)}`)
+  }
 }
 
 /** Runs the bridge for a listing or a check, and returns what it printed. */
@@ -334,6 +366,7 @@ async function bridgeText($: EngineInterface, args: string[]): Promise<string> {
   try {
     const run = await $.process.run(['node', `${$.plugin.root}/scripts/bridge.mjs`, ...args], {
       cwd: await $.session.cwd(),
+      env: await $.process.hookEnv().catch(() => ({})),
       timeoutMs: 120_000,
     })
     return run.stdout.trim() || run.stderr.trim() || `The bridge exited with code ${run.exitCode}.`
@@ -343,6 +376,9 @@ async function bridgeText($: EngineInterface, args: string[]): Promise<string> {
     return `The delegate plugin's bridge did not finish: ${message}.${hint}`
   }
 }
+
+/** A turn's id as an argument for the bridge, or none: ids are letters, digits and dashes. */
+const jobArg = (text: unknown): string[] => (typeof text === 'string' && /^[A-Za-z0-9-]+$/.test(text.trim()) ? [text.trim()] : [])
 
 const backendArg = (text: unknown): string[] => {
   const word = typeof text === 'string' ? text.trim().toLowerCase() : ''
@@ -374,6 +410,18 @@ export const register: Register = on => {
       name: 'setup',
       description: 'Checks that Node and the Codex and Antigravity CLIs are installed and signed in for the delegate plugin. Takes no arguments.',
       inputSchema: { type: 'object', properties: {} },
+    })
+    await $.tool.register({
+      name: 'status',
+      description:
+        "Lists the delegate turns on record for this workspace (id, agent, status, permission, time, task), newest first. With a turn's id, shows that turn and the last lines of its log: use it to see how far a running delegate has got, or what a stopped one did. The id is the last item of a report's headline.",
+      inputSchema: { type: 'object', properties: { turn: { type: 'string', description: "A turn's id, as in task-mwu2k58b3d42. All turns when left out." } } },
+    })
+    await $.tool.register({
+      name: 'result',
+      description:
+        "Prints the full record of a delegate turn: its answer, the session id, every action it took and its token usage. It works for a turn that was stopped or failed half-way, which handed back no report. Without an id, the turn that ended last in this workspace.",
+      inputSchema: { type: 'object', properties: { turn: { type: 'string', description: "A turn's id, as in task-mwu2k58b3d42. The last turn that ended when left out." } } },
     })
     return next(e)
   })
@@ -440,4 +488,14 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'mcp__delegate__setup' }, async $ => ({ result: await bridgeText($, ['setup']) }))
+
+  on('tool.call', { tool: 'mcp__delegate__status' }, async ($, e) => {
+    const input = e as unknown as { turn?: unknown }
+    return { result: await bridgeText($, ['status', ...jobArg(input.turn)]) }
+  })
+
+  on('tool.call', { tool: 'mcp__delegate__result' }, async ($, e) => {
+    const input = e as unknown as { turn?: unknown }
+    return { result: await bridgeText($, ['result', ...jobArg(input.turn)]) }
+  })
 }

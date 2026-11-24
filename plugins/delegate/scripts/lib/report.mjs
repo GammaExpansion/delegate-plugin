@@ -1,5 +1,5 @@
-// What the bridge prints for people and for Claude: a turn's report, the model lists and
-// the setup check.
+// What the bridge prints for people and for Claude: a turn's report, the records of past
+// turns, the model lists and the setup check.
 import { effortLabel } from "./backends/shared.mjs";
 import { oneLine } from "./text.mjs";
 
@@ -39,16 +39,27 @@ function declinedNote(approvals, mode) {
   return `note: this conversation is in ${mode ?? "a"} permission mode, in which nobody is asked, so these were declined. They can be done once the user switches the conversation to a mode that allows them and the delegate is asked again.`;
 }
 
+/** "full-access, no sandbox", "auto, sandbox", "read-only": the option a turn ran with. */
+export function optionLabel(permission, sandbox) {
+  return sandbox === "disabled" ? `${permission}, no sandbox` : sandbox === "enabled" ? `${permission}, sandbox` : permission;
+}
+
+export { agentLabel };
+
 /**
  * One finished turn as its subagent hands it back: a headline, how the turn ended, what
- * was declined, and then the delegate's answer, unchanged.
+ * was declined, and then the delegate's answer, unchanged. The headline ends with the
+ * turn's id, which `result` takes to print its full record.
  * @param {{ backend: object, permission: string, sandbox?: string | null, approvals: string, mode?: string | null,
- *   model: string | null, effort: string | null, durationMs: number,
+ *   model: string | null, effort: string | null, durationMs: number, jobId?: string | null,
  *   result: import("./backends/index.mjs").RunResult }} turn
  */
-export function renderReport({ backend, permission, sandbox, approvals, mode, model, effort, durationMs, result }) {
-  const option = sandbox === "disabled" ? `${permission}, no sandbox` : sandbox === "enabled" ? `${permission}, sandbox` : permission;
-  const lines = [[`[delegate] ${agentLabel(backend, model, effort)}`, result.status, formatDuration(durationMs), option].join(" · ")];
+export function renderReport({ backend, permission, sandbox, approvals, mode, model, effort, durationMs, jobId, result }) {
+  const head = [`[delegate] ${agentLabel(backend, model, effort)}`, result.status, formatDuration(durationMs), optionLabel(permission, sandbox)];
+  if (jobId) head.push(jobId);
+  const lines = [head.join(" · ")];
+  // The backend's own id for the conversation: what --resume takes to continue it later.
+  if (result.sessionId) lines.push(`session: ${result.sessionId}`);
   if (result.error) lines.push(`error: ${result.error}`);
   if (result.status === "cancelled" && !result.error) lines.push("note: the run was stopped before it finished.");
   for (const note of result.notes ?? []) lines.push(`note: ${note}`);
@@ -61,6 +72,52 @@ export function renderReport({ backend, permission, sandbox, approvals, mode, mo
   // A turn that failed without a word has its error above, and nothing to add here.
   const answer = result.text || (result.status === "cancelled" ? "(no answer: the run was stopped)" : result.error ? null : "(no message)");
   if (answer !== null) lines.push("", answer);
+  return lines.join("\n");
+}
+
+const durationOf = (job) => (Date.parse(job.finishedAt ?? "") || Date.now()) - Date.parse(job.createdAt);
+
+/** The headline of a turn's record, in the shape of a report's. */
+const headlineOf = (job) => [`[delegate] ${job.agent}`, job.status, formatDuration(durationOf(job)), job.option, job.id].join(" · ");
+
+/** The turns of a workspace, newest first, for `status`. */
+export function renderStatusList(jobs) {
+  if (!jobs.length) return "No delegate turns are on record for this workspace.";
+  const rows = jobs.map((job) => [job.id, job.agent, job.status, job.option, formatDuration(durationOf(job)), oneLine(job.task, 60)]);
+  return table(["TURN", "AGENT", "STATUS", "PERMISSION", "TIME", "TASK"], rows).join("\n");
+}
+
+/** One turn while it runs or after: what it is, and the last lines of its log, for `status <id>`. */
+export function renderJobDetail(job, logTail) {
+  const lines = [headlineOf(job), `task: ${oneLine(job.task, 300)}`, `directory: ${job.cwd}`];
+  if (job.sessionId) lines.push(`session: ${job.sessionId}`);
+  if (job.result?.error) lines.push(`error: ${job.result.error}`);
+  if (logTail.length) lines.push("", "--- recent activity ---", ...logTail);
+  lines.push("", job.status === "running" ? "Still running. Stop it by stopping its subagent." : `Finished. Its full record: result ${job.id}`);
+  return lines.join("\n");
+}
+
+const MAX_ACTIONS = 30;
+
+/** The full record of a turn, for `result`: what it answered, did and cost, however it ended. */
+export function renderResult(job) {
+  const result = job.result ?? {};
+  const lines = [headlineOf(job), `task: ${oneLine(job.task, 300)}`];
+  if (job.sessionId) lines.push(`session: ${job.sessionId}  (continue this conversation from a new delegate with --resume ${job.sessionId})`);
+  if (result.error) lines.push(`error: ${result.error}`);
+  if (job.status === "running") lines.push("note: this turn is still running; what follows is what it has done so far.");
+  if (job.status === "cancelled" && !result.error) lines.push("note: the run was stopped before it finished.");
+  for (const note of result.notes ?? []) lines.push(`note: ${note}`);
+  lines.push("", "--- final message ---", result.text ? result.text : "(no message)");
+  const actions = result.actions ?? [];
+  if (actions.length) {
+    lines.push("", `--- actions (${actions.length}) ---`, ...actions.slice(0, MAX_ACTIONS).map(renderAction));
+    if (actions.length > MAX_ACTIONS) lines.push(`- … ${actions.length - MAX_ACTIONS} more`);
+  }
+  if (result.usage) {
+    const n = (value) => (Number.isFinite(value) ? value.toLocaleString("en-US") : "?");
+    lines.push("", `usage: input ${n(result.usage.inputTokens)} · output ${n(result.usage.outputTokens)} · total ${n(result.usage.totalTokens)}`);
+  }
   return lines.join("\n");
 }
 

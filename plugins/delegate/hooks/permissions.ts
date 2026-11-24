@@ -17,7 +17,8 @@
 //
 // A task may ask for another option, or another sandbox, on its prompt's first line
 // (options.ts). What asks for less than the mode gives is taken as it is; what asks for more
-// is put to the user first (register.tsx), for that one turn.
+// is put to the user first (register.tsx): for that one turn, or, if they say so, for the
+// rest of the conversation with that delegate.
 
 import { PRODUCT } from './agents'
 
@@ -74,6 +75,16 @@ function unsandboxed(backend: Backend, permission: string, sandbox: Sandbox): bo
 export function describe(backend: Backend, grant: Pick<Grant, 'permission' | 'sandbox'>): string {
   if (backend === 'codex') return unsandboxed(backend, grant.permission, grant.sandbox) ? `${grant.permission}, no sandbox` : grant.permission
   return grant.sandbox === 'enabled' ? `${grant.permission}, sandbox` : grant.permission
+}
+
+/** What the user allowed a conversation, for good: an option and its sandbox. */
+export type Allowance = Pick<Grant, 'permission' | 'sandbox'>
+
+/** Whether what a task asks for is within what the user allowed the conversation earlier. */
+export function covers(backend: Backend, allowed: Allowance, wanted: Allowance): boolean {
+  const rank = RANK[backend]
+  if ((rank[wanted.permission] ?? 0) > (rank[allowed.permission] ?? 0)) return false
+  return !unsandboxed(backend, wanted.permission, wanted.sandbox) || unsandboxed(backend, allowed.permission, allowed.sandbox)
 }
 
 export type Asked = { grant: Grant; wider: boolean } | { error: string }

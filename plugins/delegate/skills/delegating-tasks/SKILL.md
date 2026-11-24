@@ -47,7 +47,7 @@ Only when the user asks for it, put `--permission <option>` and `--sandbox enabl
 | Codex       | `read-only`, `ask-for-approval`, `approve-for-me`, `full-access` | `disabled` runs commands without Codex's sandbox (not with `read-only`); `enabled` keeps one even with `full-access` |
 | Antigravity | `plan`, `default`, `accept-edits`, `auto`, `skip-permissions`     | `enabled` turns on agy's terminal sandbox; it has none otherwise, except in `auto`, which always has it (so not `disabled` with `auto`) |
 
-Less than this conversation's mode gives is taken as it is. More (a higher option, or Codex without its sandbox) is put to the user in a question first, and holds for that one turn: write the options again on a follow-up that needs them. Never write them on your own to get past a refusal.
+Less than this conversation's mode gives is taken as it is. More (a higher option, or Codex without its sandbox) is put to the user in a question first. They can allow it for that one turn, or for the rest of that conversation with the delegate; either way the options hold only for a turn that carries them, so write them again on every follow-up that needs them. Never write them on your own to get past a refusal.
 
 What was declined is listed in the report. To let the delegate do it, the user switches this conversation to a mode that allows it, or asks you to run that turn with more; then continue the same subagent ("try again") and it carries on with what it knows. Do not ask the delegate to work around a refusal.
 

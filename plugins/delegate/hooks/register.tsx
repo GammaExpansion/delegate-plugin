@@ -25,7 +25,7 @@ import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './age
 import { endTurn, handBack, handBackFailed, latestMessage, row, say } from './answer'
 import { oneLine, runTurn, type ApprovalAnswer, type ApprovalRequest, type TurnControl } from './bridge'
 import { takeOptions } from './options'
-import { askedFor, describe, grantFor, type Backend, type Grant } from './permissions'
+import { askedFor, covers, describe, grantFor, type Allowance, type Backend, type Grant } from './permissions'
 
 /** A delegate conversation, kept across sessions so that a resumed one can go on. */
 type Conversation = { backend: Backend; sessionId: string; model: string | null; effort: string | null; at: number }
@@ -80,6 +80,9 @@ const LEASE_SEC = 240
 // How much of the log one row's result holds.
 const ROW_TEXT_AT_MOST = 6000
 const conversationKey = (agentId: string) => `conversation:${agentId}`
+// What the user allowed a conversation for good goes by the backend's session, not by the
+// subagent, so that it holds when the conversation is continued from a later Claude session.
+const allowanceKey = (backend: Backend, sessionId: string) => `allowed:${backend}:${sessionId}`
 
 /** How much of what a delegate asks to do is shown; anything longer can only be declined. */
 const SHOWN_AT_MOST = 2000
@@ -142,13 +145,28 @@ async function loadConversation($: EngineInterface, agentId: string): Promise<Co
   return typeof value === 'object' && value !== null && 'sessionId' in value ? (value as Conversation) : undefined
 }
 
-async function saveConversation($: EngineInterface, agentId: string, conversation: Conversation): Promise<void> {
-  await $.store.set(conversationKey(agentId), conversation)
-  const keys = (await $.store.keys()).filter(key => key.startsWith('conversation:'))
+/** Keeps the newest CONVERSATIONS_KEPT of the store's entries of one kind. */
+async function prune($: EngineInterface, prefix: string): Promise<void> {
+  const keys = (await $.store.keys()).filter(key => key.startsWith(prefix))
   if (keys.length <= CONVERSATIONS_KEPT + 20) return
-  const dated = await Promise.all(keys.map(async key => ({ key, at: ((await $.store.get(key)) as Conversation | undefined)?.at ?? 0 })))
+  const dated = await Promise.all(keys.map(async key => ({ key, at: ((await $.store.get(key)) as { at?: number } | undefined)?.at ?? 0 })))
   dated.sort((a, b) => a.at - b.at)
   for (const { key } of dated.slice(0, dated.length - CONVERSATIONS_KEPT)) await $.store.delete(key)
+}
+
+async function saveConversation($: EngineInterface, agentId: string, conversation: Conversation): Promise<void> {
+  await $.store.set(conversationKey(agentId), conversation)
+  await prune($, 'conversation:')
+}
+
+async function loadAllowance($: EngineInterface, backend: Backend, sessionId: string): Promise<Allowance | undefined> {
+  const value = await $.store.get(allowanceKey(backend, sessionId))
+  return typeof value === 'object' && value !== null && 'permission' in value ? (value as Allowance) : undefined
+}
+
+async function saveAllowance($: EngineInterface, backend: Backend, sessionId: string, allowed: Allowance): Promise<void> {
+  await $.store.set(allowanceKey(backend, sessionId), { permission: allowed.permission, sandbox: allowed.sandbox, at: Date.now() })
+  await prune($, 'allowed:')
 }
 
 /** What a request asks for, in words that say what kind of thing it is. */
@@ -228,24 +246,29 @@ async function confirmWider(
   base: Grant,
   wanted: Grant,
   note: (line: string) => void,
-): Promise<Grant> {
+): Promise<{ grant: Grant; always: boolean }> {
   const from = describe(backend, base)
   const to = describe(backend, wanted)
   if (base.mode === 'dontAsk') {
     note(`the task asked for ${to}, more than ${base.mode} mode gives, and nobody is asked in that mode, so it ran with ${from}.`)
-    return base
+    return { grant: base, always: false }
   }
   const keep = `Keep ${from}`
-  const allow = `Allow ${to}`
+  const allow = `Allow ${to} for this turn`
+  const always = `Always allow ${to} in this conversation with ${AGENT_NAME[backend]}`
   try {
     const answer = await $.ui.ask(
-      `This conversation is in ${base.mode} mode, which gives ${AGENT_NAME[backend]} ${from}. The task "${oneLine(task, 160)}" asks for ${to}. Allow that for this turn?`,
+      `This conversation is in ${base.mode} mode, which gives ${AGENT_NAME[backend]} ${from}. The task "${oneLine(task, 160)}" asks for ${to}. Allow that?`,
       // Keep first, so that an answer the user did not pick themselves never widens.
-      { header: PRODUCT[backend], options: [keep, allow] },
+      { header: PRODUCT[backend], options: [keep, allow, always] },
     )
     if (answer === allow) {
       note(`ran with ${to}, which the task asked for and the user allowed for this turn (${base.mode} mode gives ${from}).`)
-      return wanted
+      return { grant: wanted, always: false }
+    }
+    if (answer === always) {
+      note(`ran with ${to}, which the task asked for and the user allowed for the rest of this conversation with ${AGENT_NAME[backend]} (${base.mode} mode gives ${from}).`)
+      return { grant: wanted, always: true }
     }
     note(
       answer === keep
@@ -255,7 +278,7 @@ async function confirmWider(
   } catch {
     note(`the task asked for ${to}; the question was closed without an answer, so it ran with ${from}.`)
   }
-  return base
+  return { grant: base, always: false }
 }
 
 /** The report with lines added under its headline and its session line. */
@@ -285,11 +308,27 @@ async function runDelegate(
   }
   const notes: string[] = []
   let grant = grantFor(backend, spawn?.mode ?? undefined)
+  // The session this turn continues, where it is known before the backend opens it.
+  const continued = leading.resume ?? before?.sessionId ?? null
+  // What the user allowed for good in this turn, to be kept once the session has an id.
+  let newlyAllowed: Allowance | null = null
   if (leading.permission !== null || leading.sandbox !== null) {
     const asked = askedFor(backend, grant, leading.permission, leading.sandbox)
     if ('error' in asked) return failed(backend, asked.error)
-    grant = asked.wider ? await confirmWider($, backend, leading.task, grant, asked.grant, line => notes.push(line)) : asked.grant
+    const allowed = asked.wider && continued !== null ? await loadAllowance($, backend, continued) : undefined
+    if (!asked.wider) {
+      grant = asked.grant
+    } else if (allowed !== undefined && covers(backend, allowed, asked.grant)) {
+      notes.push(`ran with ${describe(backend, asked.grant)}, which the user allowed for this conversation earlier (${grant.mode} mode gives ${describe(backend, grant)}).`)
+      grant = asked.grant
+    } else {
+      run.line = `asking you whether to allow ${describe(backend, asked.grant)}`
+      const answer = await confirmWider($, backend, leading.task, grant, asked.grant, line => notes.push(line))
+      grant = answer.grant
+      if (answer.always) newlyAllowed = { permission: grant.permission, sandbox: grant.sandbox }
+    }
   }
+  if (newlyAllowed !== null && continued !== null) await saveAllowance($, backend, continued, newlyAllowed)
 
   const model = leading.model ?? before?.model ?? null
   const effort = leading.effort ?? before?.effort ?? null
@@ -337,6 +376,8 @@ async function runDelegate(
         // The model and effort kept are the ones asked for, so that a conversation left
         // to the backend's default stays on it.
         await saveConversation($, agentId, { backend, sessionId, model, effort, at: Date.now() })
+        // A conversation that began with this turn has its id only now.
+        if (newlyAllowed !== null && continued === null) await saveAllowance($, backend, sessionId, newlyAllowed)
       },
       onActivity: line => show('running', line),
       onApproval: request =>

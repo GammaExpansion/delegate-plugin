@@ -231,12 +231,13 @@ The question also takes text of your own. That declines the request, and your wo
 A task can ask for another option or sandbox with `--permission` and `--sandbox` on its prompt's first line. Less than your mode gives (a lower option, or a sandbox) is taken as it is. More (a higher option, or Codex without its sandbox) is put to you first:
 
 ```text
-This conversation is in auto mode, which gives Codex Agent approve-for-me. The task asks for full-access, no sandbox. Allow that for this turn?
+This conversation is in auto mode, which gives Codex Agent approve-for-me. The task asks for full-access, no sandbox. Allow that?
   Keep approve-for-me
-  Allow full-access, no sandbox
+  Allow full-access, no sandbox for this turn
+  Always allow full-access, no sandbox in this conversation with Codex Agent
 ```
 
-Only "Allow" takes it, and only for that turn. In don't-ask mode nobody is asked, and the mode's option stands. Claude is told to write these options only when you ask, for example "use a full-access Codex for this, it needs adb".
+"Allow … for this turn" takes it for that turn. "Always allow" takes it for the rest of that conversation with the delegate: later turns that ask for the same or less are not put to you again, and each such report says that it ran on your earlier answer. It goes by the backend's session, so it holds when the conversation is continued with `--resume` from a later Claude session, and a new conversation starts without it. A turn must still ask: with nothing on its first line it runs with what the mode gives. Any other answer, or none, keeps the mode's option. In don't-ask mode nobody is asked: the mode's option stands unless you allowed more for that conversation earlier. Claude is told to write these options only when you ask, for example "use a full-access Codex for this, it needs adb".
 
 ### Before relying on an option
 

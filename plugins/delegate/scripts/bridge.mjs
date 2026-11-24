@@ -11,6 +11,10 @@
 //                               the last lines of its log, as text
 //   bridge.mjs result [turn]    the full record of a turn (the last one that ended, when
 //                               none is named): its answer, what it did and what it cost
+//   bridge.mjs wait <turn> --from <offset>
+//                               waits until the turn's log has something new, or the turn
+//                               is over, and prints { status, nextOffset, text } as JSON.
+//                               The hooks module shows each such stretch as a row.
 //
 // `run` keeps a record and a log of its turn on disk as it goes (lib/state.mjs), which is
 // what `status` and `result` read: while the turn runs, after it, and when it was stopped
@@ -35,6 +39,10 @@
 //                                            which decline the request and are passed on
 //   { type: "result", result, report }       the RunResult, and the report for Claude
 // and `cancel` holds { "token" }.
+//
+// A request with `leaseSec` is watched: the module writes `alive` into the control directory
+// as it follows the turn, and a turn nobody has followed for that long is stopped. That is
+// how a turn ends when its subagent is gone at a moment in which no hook was running.
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -42,7 +50,7 @@ import path from "node:path";
 
 import { BACKENDS, getBackend } from "./lib/backends/index.mjs";
 import { agentLabel, optionLabel, renderJobDetail, renderModels, renderReport, renderResult, renderSetup, renderStatusList } from "./lib/report.mjs";
-import { appendLog, findJob, finishJob, isActive, listJobs, newJobId, pruneJobs, readLogTail, updateJob, writeJob } from "./lib/state.mjs";
+import { appendLog, findJob, finishJob, isActive, listJobs, newJobId, pruneJobs, readLogFrom, readLogTail, updateJob, writeJob } from "./lib/state.mjs";
 import { oneLine } from "./lib/text.mjs";
 
 const POLL_MS = 150;
@@ -81,6 +89,7 @@ function traceFileFor(backendName) {
  * @property {string | null} [model]
  * @property {string | null} [effort]
  * @property {string | null} [resumeSessionId]
+ * @property {number} [leaseSec]       stop the turn when `alive` in the control directory is older than this
  * @property {boolean} [resumeNamed]   the turn names that session itself: it fails if the session cannot be continued
  */
 
@@ -110,7 +119,28 @@ async function cmdRun() {
     }
   };
 
+  // The lease. A machine that slept is not a turn nobody followed: when this process was
+  // itself held up, the count starts again.
+  const leaseMs = Math.max(0, Number(request.leaseSec) || 0) * 1000;
+  let leaseFrom = Date.now();
+  let lastTick = Date.now();
+  let leaseRanOut = false;
+  const followedAt = () => {
+    try {
+      return Math.max(leaseFrom, fs.statSync(path.join(controlDir, "alive")).mtimeMs);
+    } catch {
+      return leaseFrom;
+    }
+  };
+
   const poll = setInterval(() => {
+    const now = Date.now();
+    if (now - lastTick > 10_000) leaseFrom = now;
+    lastTick = now;
+    if (leaseMs > 0 && !controller.signal.aborted && now - followedAt() > leaseMs) {
+      leaseRanOut = true;
+      controller.abort();
+    }
     if (!controller.signal.aborted && readSigned("cancel")) controller.abort();
     for (const [id, resolve] of pending) {
       const signed = readSigned(`answer-${id}.json`);
@@ -230,6 +260,7 @@ async function cmdRun() {
     fs.rmSync(controlDir, { recursive: true, force: true });
   }
 
+  if (leaseRanOut) result.notes = [...(result.notes ?? []), `nothing followed this turn for ${Math.round(leaseMs / 1000)}s (its subagent was gone), so it was stopped`];
   if (traceFile) result.notes = [...(result.notes ?? []), `the JSON-RPC trace of this turn is in ${traceFile}`];
   const report = renderReport({
     backend,
@@ -312,6 +343,43 @@ function cmdResult([id]) {
   return 0;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const envMs = (name, fallback) => (Number.isFinite(Number(process.env[name])) && process.env[name] !== undefined && process.env[name] !== "" ? Number(process.env[name]) : fallback);
+
+/**
+ * How long `wait` goes on gathering once something new is in the log, by the turn's age:
+ * a young turn is shown step by step, a long one about once a minute.
+ */
+function settleMsFor(job) {
+  const ageMs = Date.now() - Date.parse(job.createdAt);
+  return envMs("DELEGATE_ROW_SETTLE_MS", ageMs < 60_000 ? 4_000 : ageMs < 300_000 ? 15_000 : 45_000);
+}
+
+async function cmdWait([id, ...rest]) {
+  const fromAt = rest.indexOf("--from");
+  const from = Math.max(0, Number(fromAt === -1 ? 0 : rest[fromAt + 1]) || 0);
+  const cwd = process.cwd();
+  const maxMs = envMs("DELEGATE_ROW_MAX_MS", 90_000);
+  const startedAt = Date.now();
+  let newsAt = null;
+  let found = id ? findJob(cwd, id) : null;
+  while (found && isActive(found.job)) {
+    const now = Date.now();
+    if (newsAt === null && readLogFrom(found.home, id, from).nextOffset > from) newsAt = now;
+    if (newsAt !== null && now - newsAt >= settleMsFor(found.job)) break;
+    if (now - startedAt >= maxMs) break;
+    await sleep(200);
+    found = findJob(cwd, id);
+  }
+  if (!found) {
+    console.log(JSON.stringify({ status: "unknown", nextOffset: from, text: "" }));
+    return 0;
+  }
+  const { text, nextOffset } = readLogFrom(found.home, id, from);
+  console.log(JSON.stringify({ status: found.job.status, nextOffset, text }));
+  return 0;
+}
+
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
   switch (command) {
@@ -325,8 +393,10 @@ async function main() {
       return cmdStatus(argv);
     case "result":
       return cmdResult(argv);
+    case "wait":
+      return cmdWait(argv);
     default:
-      throw new Error(`Unknown command "${command ?? ""}". Use run, models, setup, status or result.`);
+      throw new Error(`Unknown command "${command ?? ""}". Use run, models, setup, status, result or wait.`);
   }
 }
 

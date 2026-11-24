@@ -117,6 +117,23 @@ export function appendLog(cwd, id, text) {
   }
 }
 
+/**
+ * The whole entries of a turn's log from a byte offset on, and the offset to pass next
+ * time. An entry still being written is left for the next read.
+ */
+export function readLogFrom(cwd, id, offset = 0) {
+  let buffer;
+  try {
+    buffer = fs.readFileSync(logFile(cwd, id));
+  } catch {
+    return { text: "", nextOffset: offset };
+  }
+  const start = Math.min(Math.max(0, offset), buffer.length);
+  const end = buffer.lastIndexOf(0x0a) + 1;
+  if (end <= start) return { text: "", nextOffset: start };
+  return { text: buffer.subarray(start, end).toString("utf8"), nextOffset: end };
+}
+
 export function readLogTail(cwd, id, lines = 15) {
   try {
     return fs.readFileSync(logFile(cwd, id), "utf8").trimEnd().split("\n").slice(-lines);

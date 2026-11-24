@@ -19,6 +19,8 @@ export type TurnRequest = {
   resumeSessionId: string | null
   /** The session was named for this turn: if it cannot be continued the turn fails, and no new one is started. */
   resumeNamed: boolean
+  /** The bridge stops a turn that nothing has followed for this long (TurnControl.follow). */
+  leaseSec: number
 }
 
 export type Action = { kind: string; title: string; status?: string; exitCode?: number | null; permission?: string }
@@ -53,7 +55,19 @@ type BridgeEvent =
   | { type: 'result'; result: RunResult; report: string }
   | { type: 'error'; message: string }
 
+/** What the module can do to a turn while the bridge runs it. */
+export type TurnControl = {
+  /** The id of the turn's record, which `bridge.mjs wait` follows; null where no record could be kept. */
+  jobId: string | null
+  /** Says that the turn is still being followed, which keeps its lease. */
+  follow: () => Promise<void>
+  /** Stops the turn: the bridge interrupts the backend, records how far it got, and ends. */
+  cancel: () => Promise<void>
+}
+
 export type TurnHooks = {
+  /** The bridge is up: how to follow and stop its turn. */
+  onReady: (control: TurnControl) => void
   /** The backend opened or resumed its session: keep the id to continue it next turn. */
   onSession: (sessionId: string, model: string | null, effort: string | null) => Promise<void>
   /** What the delegate did last, in one line. */
@@ -122,10 +136,17 @@ export async function runTurn($: EngineInterface, request: TurnRequest, hooks: T
       return
     }
     switch (event.type) {
-      case 'ready':
-        controlDir = event.controlDir
-        token = event.token
+      case 'ready': {
+        const dir = event.controlDir
+        const sign = event.token
+        controlDir = dir
+        token = sign
+        const write = async (name: string) => {
+          if (!ended) await $.fs.write(`${dir}/${name}`, JSON.stringify({ token: sign, at: Date.now() })).catch(() => {})
+        }
+        hooks.onReady({ jobId: event.jobId, follow: () => write('alive'), cancel: () => write('cancel') })
         return
+      }
       case 'event': {
         const inner = event.event
         if (inner.type === 'session') {

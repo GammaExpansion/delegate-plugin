@@ -40,13 +40,14 @@ function runTurn(request, { env = {}, onEvent = () => {} } = {}) {
   const events = [];
   let controlDir = null;
   let token = null;
+  let jobId = null;
   let stderr = "";
   child.stderr.on("data", (chunk) => (stderr += chunk));
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
     const event = JSON.parse(line);
     events.push(event);
-    if (event.type === "ready") ({ controlDir, token } = event);
-    onEvent(event, { controlDir, token, child });
+    if (event.type === "ready") ({ controlDir, token, jobId } = event);
+    onEvent(event, { controlDir, token, jobId, child });
   });
   return new Promise((resolve) => {
     child.on("exit", (code) => {
@@ -436,6 +437,71 @@ test("a turn whose bridge was killed is on record as failed, not as running for 
     }
   );
   assert.match(ask("status", id).out, /· failed · [^\n]*\n[\s\S]*error: The turn's process ended without recording a result/);
+});
+
+test("wait returns a turn's log from an offset on, and nothing more once it has been read", async () => {
+  const { events } = await runTurn({ backend: "codex", permission: "read-only" }, { env: { FAKE_CODEX_SCENARIO: "normal" } });
+  const id = events.find((event) => event.type === "ready").jobId;
+  const first = JSON.parse(ask("wait", id, "--from", "0").out);
+  assert.equal(first.status, "completed");
+  assert.match(first.text, /^\[\d\d:\d\d:\d\d\] started codex with read-only\n[\s\S]*finished: completed\n$/);
+  assert.ok(first.nextOffset > 0);
+  assert.deepEqual(JSON.parse(ask("wait", id, "--from", String(first.nextOffset)).out), { status: "completed", nextOffset: first.nextOffset, text: "" });
+  assert.equal(JSON.parse(ask("wait", "task-nosuch", "--from", "7").out).status, "unknown");
+});
+
+test("wait holds on while a turn runs, and returns once there is news", async () => {
+  let waited = null;
+  await runTurn(
+    { backend: "agy", permission: "default", approvals: "ask" },
+    {
+      env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
+      onEvent: (event, ctx) => {
+        if (event.type !== "approval") return;
+        // The turn now waits for an answer. Everything so far is read; the next wait has
+        // nothing to return until the answer is logged.
+        const sofar = JSON.parse(ask("wait", ctx.jobId, "--from", "0").out);
+        assert.equal(sofar.status, "running");
+        const child = spawn(process.execPath, [BRIDGE, "wait", ctx.jobId, "--from", String(sofar.nextOffset)], {
+          cwd: scratch,
+          env: { ...process.env, ...STATE, DELEGATE_ROW_SETTLE_MS: "50" }
+        });
+        let out = "";
+        child.stdout.on("data", (chunk) => (out += chunk));
+        waited = new Promise((resolve) => child.on("exit", () => resolve(JSON.parse(out))));
+        setTimeout(() => answer(ctx, event.id, { choice: "accept" }), 400);
+      }
+    }
+  );
+  const news = await waited;
+  assert.match(news.text, /the user answered: accept/);
+});
+
+test("a turn that nothing follows is stopped when its lease runs out, and says so", async () => {
+  const { result } = await runTurn(
+    { backend: "agy", permission: "default", approvals: "ask", leaseSec: 1 },
+    { env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" } }
+  );
+  assert.equal(result.result.status, "cancelled");
+  assert.match(result.report, /note: nothing followed this turn for 1s \(its subagent was gone\), so it was stopped/);
+});
+
+test("a turn that is followed keeps its lease", async () => {
+  let follow = null;
+  const { result } = await runTurn(
+    { backend: "agy", permission: "default", approvals: "ask", leaseSec: 1 },
+    {
+      env: { FAKE_AGY_SCENARIO: "ask", DELEGATE_AGY_BACKGROUND_WAIT_SEC: "30" },
+      onEvent: (event, ctx) => {
+        if (event.type !== "approval") return;
+        follow = setInterval(() => fs.writeFileSync(path.join(ctx.controlDir, "alive"), "{}"), 200);
+        setTimeout(() => answer(ctx, event.id, { choice: "accept" }), 2200);
+      }
+    }
+  );
+  clearInterval(follow);
+  assert.equal(result.result.status, "completed");
+  assert.equal(result.result.text, "Tests passed: 40/40");
 });
 
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));

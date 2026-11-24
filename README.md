@@ -126,6 +126,22 @@ One subagent is one conversation with the backend. Claude continues it with Send
 
 Every report prints the backend's own id for the conversation, as `session: <id>` under the headline. That id outlives the Claude session: in a later one, start a new delegate with `--resume <id>` on the first line and it continues that conversation; follow-ups then go by SendMessage as usual. Keep the id if a conversation is meant to last, for example a reviewer that should remember earlier rounds. A session named this way must be there: if the backend cannot load it, the turn fails with the backend's own message and no new session is started. One subagent is one conversation, so a different `--resume` sent to a subagent that already has one is refused. With `--resume` and no `--model`, the backend picks the model.
 
+### When a turn is cut off
+
+A turn ends early when its subagent is stopped, when the plugin is reloaded or updated, and when Claude Code is closed or restarted. No report comes back, or the subagent says that its report was lost. The work the delegate did is not lost: the backend's session holds it, and the turn is on record. To take it up again:
+
+1. Find the turn. `/delegate:status` lists the turns of the repository; the one that was cut off reads `cancelled`, `failed`, or `running` under a process that is gone.
+2. Read what it did. `/delegate:result <turn id>` prints what the delegate said and did up to then, and the `session:` id of its conversation.
+3. Continue the same conversation, and say what to go on with:
+   - If the subagent is still there (the same Claude session), send it a message.
+   - If it is not (a new Claude session), start a new delegate of the same backend with `--resume <session id>` on the prompt's first line.
+
+   Write `--model` and `--permission` again if the turn needs them: only the conversation is carried over.
+
+The delegate remembers its whole conversation, the turn that was cut off included. A command that was running when the turn ended was stopped with it, so ask the delegate to check what state it left things in before it goes on.
+
+If the backend cannot load the session any more, the turn fails and says so. That conversation is over: a new one has to be started and told what it needs to know.
+
 ### Progress and reports
 
 While a delegate works, the line under its Agent row says who it is and what it did last:
@@ -255,7 +271,7 @@ The plugin is a mod: its hooks are a TypeScript module that runs inside Claude C
 - `delegate:codex` and `delegate:agy` are registered as agent types, but their model is never called. A `turn.step` hook answers every model request of their loops. The first of a turn reads the latest message sent to the subagent and starts the turn on the backend; while the turn runs, each request is answered with a row (a Bash call that a `tool.call` hook of the plugin answers, and that runs nothing); the one after the turn has ended is answered with the backend's answer, as the subagent's report. Where Claude Code offers the subagent its hand-back tool (in auto mode), the report goes through it; elsewhere it is the subagent's last words.
 - The module cannot run Node, so each turn starts `scripts/bridge.mjs`. The request goes in on stdin, events come back as JSON lines, and answers to the backend's requests go back as files in a control directory the bridge makes for the turn. That directory is in the system temp directory, where a backend's sandbox can write, so every file the bridge reads must carry a random token it sent to the module on stdout alone: a delegate cannot answer its own request. When the subagent is stopped, the bridge is stopped, and it interrupts the backend.
 - The permission mode comes with every spawn of the subagent, the first and each continuation, so a delegate follows a mode you switch to between turns.
-- Each subagent's backend session id is kept in the plugin's store, so a continued conversation resumes the same backend session. A session that can no longer be resumed is replaced by a new one, and the report says so.
+- Each subagent's backend session id is kept in the plugin's store, so a continued conversation resumes the same backend session. A session that can no longer be resumed fails the turn, and nothing is started in its place: a delegate that has lost what it knew does not carry on as if it had not.
 - What a reload of the plugin must not lose (each subagent's mode, each turn taken on, the progress line) is in Claude Code's session state, and a turn is never run twice.
 
 ```text

@@ -58,7 +58,7 @@ Before a delegate turn that can edit, check that its files do not overlap with f
 - To follow up, or to answer a question the delegate asked, continue the same subagent with SendMessage and send only what is new. A new subagent starts a delegate that remembers nothing.
 - A conversation from an earlier Claude session can be continued by its id on the backend's side, which every report prints as `session: <id>`. Start a new subagent of the same backend with `--resume <id>` on the prompt's first line; from then on SendMessage continues it without the option. Write `--resume` only when the user or the project's own notes give the id. If the conversation is to outlive this Claude session, the `session:` line is the thing to keep.
 - With `--resume` and no `--model`, the backend picks the model; the headline says which one ran. Write `--model` again if the conversation must stay on one.
-- A session that cannot be continued fails the turn; nothing is started in its place. One subagent is one conversation: a second, different `--resume` to the same subagent is refused.
+- A session that cannot be continued fails the turn, whether you named it or the delegate remembered it; nothing is started in its place. Tell the user, and start a new conversation only if they want one: the new delegate knows nothing of the old one, so its brief has to carry what matters. One subagent is one conversation: a second, different `--resume` to the same subagent is refused.
 - Only the options named here go on the first line. Anything else that looks like an option there is refused, so do not pass on options from other tools or earlier versions (`--brief-file`, `--timeout-sec`): put the brief's text in the prompt.
 - A report whose answer is a question is not a result. Answer it if this conversation can, otherwise ask the user.
 - Wait for a delegate's report before you send it anything more. A message sent while its turn runs does not reach the backend; the report then says so, and the message has to be sent again.
@@ -75,6 +75,18 @@ A report is a headline (agent, model, outcome, time, permission option, the turn
 - A `note:` that agy does not offer its auto mode means the turn ran with `accept-edits`, so its commands were declined. Tell the user; do not add `--permission` on your own to get around it.
 - In auto mode a report arrives under Claude Code's note that its classifier was unavailable for the subagent's work. That is expected for a delegate: check the work as you would anyway.
 - If a backend is missing or not logged in, point the user to `/delegate:setup`.
+
+## When a turn was cut off
+
+A delegate's turn ends early when its subagent is stopped or stalls, when the plugin is reloaded or updated, and when Claude Code restarts. You get no report, a notice that the agent stopped, or a report that says it was lost. The delegate's work is still there: its conversation is on the backend, and the turn is on record. Do not start over and do not do the task yourself. Take it up again:
+
+1. Call `mcp__delegate__status` and find the turn: it reads `cancelled` or `failed`, and its task is the one you gave.
+2. Call `mcp__delegate__result` with its id. Read what the delegate had said and done, and note the `session:` id.
+3. Continue that conversation with a short message: say that the turn was interrupted, what the record shows as done, and to check the state of things and go on.
+   - The same subagent still answers to SendMessage: send it there.
+   - It does not (a new Claude session, or "no transcript found"): start a new subagent of the same backend with `--resume <session id>` on the first line, and `--model` if the conversation must stay on one.
+
+Options on the first line are not carried over from the turn that was cut off: write again the ones the user asked for. If the turn fails because the session cannot be resumed, the conversation is gone: tell the user before you start a new one.
 
 ## Turns on record
 

@@ -302,42 +302,23 @@ test("Codex's request for more permissions shows what it asks for, and is answer
   assert.match(refused.result.report, /declined \(1\):\n- \[permissions\] write \/dev\/bus\/usb; network access \(declined\)/);
 });
 
-test("Codex: a session that cannot be resumed is replaced by a new one, with a note", async () => {
-  const { result } = await runTurn(
-    { backend: "codex", permission: "read-only", resumeSessionId: "gone-thread" },
-    { env: { FAKE_CODEX_SCENARIO: "normal", FAKE_CODEX_RESUME_FAILS: "1" } }
-  );
-  assert.equal(result.result.status, "completed");
-  assert.equal(result.result.sessionId, "thread-main");
-  assert.match(result.report, /note: the earlier Codex session could not be resumed \(no rollout found for thread\), so this turn started a new one/);
-});
-
-test("agy: a session that cannot be resumed is replaced by a new one, with a note", async () => {
-  const { result } = await runTurn(
-    { backend: "agy", permission: "default", resumeSessionId: "gone-session" },
-    { env: { FAKE_AGY_SCENARIO: "replay-late", FAKE_AGY_LOAD_FAILS: "1" } }
-  );
-  assert.equal(result.result.status, "completed");
-  assert.match(result.report, /note: the earlier agy session could not be resumed \(session not found\), so this turn started a new one/);
-});
-
-test("a session the turn names itself must be there: the turn fails and no new session is started", async () => {
+test("a session that cannot be continued fails the turn, and no new session is started in its place", async () => {
   const record = path.join(scratch, "codex-named-record.jsonl");
   const codex = await runTurn(
-    { backend: "codex", permission: "read-only", resumeSessionId: "gone-thread", resumeNamed: true },
+    { backend: "codex", permission: "read-only", resumeSessionId: "gone-thread" },
     { env: { FAKE_CODEX_SCENARIO: "normal", FAKE_CODEX_RESUME_FAILS: "1", FAKE_CODEX_RECORD: record } }
   );
   assert.equal(codex.result.result.status, "failed");
-  assert.match(codex.result.report, /^\[delegate\] Codex Agent · failed · \d+\.\ds · read-only · task-[a-z0-9]+\nerror: Codex could not resume session gone-thread: no rollout found for thread$/);
+  assert.match(codex.result.report, /^\[delegate\] Codex Agent · failed · \d+\.\ds · read-only · task-[a-z0-9]+\nerror: Codex could not resume session gone-thread: no rollout found for thread\. Its conversation cannot be gone on with: nothing was started in its place\. Start a new delegate for a new conversation\.$/);
   assert.equal(fs.existsSync(record), false, "no thread was opened");
   assert.ok(!codex.events.some((event) => event.type === "event" && event.event.type === "session"));
 
   const agy = await runTurn(
-    { backend: "agy", permission: "default", resumeSessionId: "gone-session", resumeNamed: true },
+    { backend: "agy", permission: "default", resumeSessionId: "gone-session" },
     { env: { FAKE_AGY_SCENARIO: "replay-late", FAKE_AGY_LOAD_FAILS: "1" } }
   );
   assert.equal(agy.result.result.status, "failed");
-  assert.match(agy.result.report, /error: agy could not resume session gone-session: session not found$/);
+  assert.match(agy.result.report, /error: agy could not resume session gone-session: session not found\. Its conversation cannot be gone on with/);
   assert.doesNotMatch(agy.result.report, /^session: /m);
   assert.ok(!agy.events.some((event) => event.type === "event" && event.event.type === "session"));
 });

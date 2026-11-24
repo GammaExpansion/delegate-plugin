@@ -362,7 +362,6 @@ async function runDelegate(
       model,
       effort,
       resumeSessionId: leading.resume ?? before?.sessionId ?? null,
-      resumeNamed: leading.resume !== null,
       leaseSec: LEASE_SEC,
     },
     {

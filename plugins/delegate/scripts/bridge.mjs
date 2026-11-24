@@ -90,7 +90,6 @@ function traceFileFor(backendName) {
  * @property {string | null} [effort]
  * @property {string | null} [resumeSessionId]
  * @property {number} [leaseSec]       stop the turn when `alive` in the control directory is older than this
- * @property {boolean} [resumeNamed]   the turn names that session itself: it fails if the session cannot be continued
  */
 
 async function cmdRun() {
@@ -196,8 +195,11 @@ async function cmdRun() {
 
   const startedAt = Date.now();
   let shown = { model: request.model ?? null, effort: null };
+  // The session the backend opened or resumed, for a turn that fails after that.
+  let openedSession = null;
   const onEvent = (event) => {
     if (event.type === "session") {
+      openedSession = event.sessionId;
       shown = { model: event.model ?? shown.model, effort: event.effort ?? null };
       record((id) => updateJob(request.cwd, id, { sessionId: event.sessionId, agent: agentLabel(backend, shown.model, shown.effort) }));
       log(`session ${event.sessionId}${event.model ? ` · model ${event.model}` : ""}${event.effort ? ` · effort ${event.effort}` : ""}`);
@@ -238,7 +240,6 @@ async function cmdRun() {
       model: request.model || undefined,
       effort: request.effort || undefined,
       resumeSessionId: request.resumeSessionId || undefined,
-      resumeNamed: Boolean(request.resumeNamed),
       signal: controller.signal,
       traceFile,
       onEvent,
@@ -247,7 +248,7 @@ async function cmdRun() {
   } catch (error) {
     result = {
       status: controller.signal.aborted ? "cancelled" : "failed",
-      sessionId: request.resumeNamed ? null : (request.resumeSessionId ?? null),
+      sessionId: openedSession,
       model: shown.model,
       text: "",
       actions: [],

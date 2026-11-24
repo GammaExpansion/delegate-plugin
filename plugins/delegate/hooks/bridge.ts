@@ -16,9 +16,8 @@ export type TurnRequest = {
   mode: string
   model: string | null
   effort: string | null
+  /** The backend session to continue. If it cannot be continued the turn fails: no new one is started. */
   resumeSessionId: string | null
-  /** The session was named for this turn: if it cannot be continued the turn fails, and no new one is started. */
-  resumeNamed: boolean
   /** The bridge stops a turn that nothing has followed for this long (TurnControl.follow). */
   leaseSec: number
 }

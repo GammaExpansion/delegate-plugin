@@ -15,6 +15,26 @@ export const PRODUCT: Record<Backend, string> = { codex: 'Codex', agy: 'Antigrav
 
 const agentType = (backend: Backend) => `delegate:${backend}`
 
+/** "Codex Agent (gpt-6.2-astra xHigh)", or the bare name while the model is not known. */
+export function labelOf(backend: Backend, model: string | null, effort: string | null): string {
+  if (model === null) return AGENT_NAME[backend]
+  const level = effort === null ? '' : effort.toLowerCase() === 'xhigh' ? ' xHigh' : ` ${effort.toLowerCase()}`
+  return `${AGENT_NAME[backend]} (${model}${level})`
+}
+
+/**
+ * The title a delegate's task is shown under: Claude's own few words for it, with the
+ * model and effort the prompt asks for put after the agent's name, as in
+ * "Gemini Agent (gemini-4-carbon-high): review the diff". A prompt that names no model
+ * leaves the title as it is: which model the backend picks is not known yet.
+ */
+export function titleOf(backend: Backend, description: string, model: string | null, effort: string | null): string {
+  if (model === null || description.includes(model)) return description
+  const name = AGENT_NAME[backend]
+  const label = labelOf(backend, model, effort)
+  return description.startsWith(name) ? `${label}${description.slice(name.length)}` : `${label}: ${description}`
+}
+
 export function backendOfType(type: string | undefined): Backend | undefined {
   return BACKENDS.find(backend => agentType(backend) === type)
 }

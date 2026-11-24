@@ -22,7 +22,7 @@
 
 import type { EngineInterface, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import type { Progress, SpawnRecord, TurnRecord } from '../types'
-import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType } from './agents'
+import { AGENT_NAME, AGENT_SPECS, BACKENDS, PRODUCT, backendOfType, labelOf, titleOf } from './agents'
 import { endTurn, handBack, handBackFailed, latestMessage, row, say } from './answer'
 import { oneLine, runTurn, type ApprovalAnswer, type ApprovalRequest, type TurnControl } from './bridge'
 import { takeOptions } from './options'
@@ -136,12 +136,6 @@ async function awaitSpawn($: EngineInterface, agentId: string): Promise<SpawnRec
     await $.clock.sleep(100)
   }
   return undefined
-}
-
-function labelOf(backend: Backend, model: string | null, effort: string | null): string {
-  if (model === null) return AGENT_NAME[backend]
-  const level = effort === null ? '' : effort.toLowerCase() === 'xhigh' ? ' xHigh' : ` ${effort.toLowerCase()}`
-  return `${AGENT_NAME[backend]} (${model}${level})`
 }
 
 function elapsed(ms: number): string {
@@ -681,9 +675,16 @@ export const register: Register = on => {
 
   // Every spawn of a delegate, the first and each one SendMessage makes to continue it,
   // carries the permission mode of the conversation at that moment.
+  // Its title names the model the prompt asks for, so that the list of running tasks says
+  // which model each delegate is on.
   on('agent.spawn', async ($, e, next) => {
-    const spawned = await next(e)
     const backend = backendOfType(e.subagentType)
+    const leading = backend === undefined ? null : takeOptions(e.prompt)
+    const spawned = await next(
+      backend === undefined || leading === null || 'error' in leading
+        ? e
+        : { ...e, description: titleOf(backend, e.description, leading.model, leading.effort) },
+    )
     if (backend !== undefined && spawned.agentId !== undefined) {
       notOurs.delete(spawned.agentId)
       await $.state.set(

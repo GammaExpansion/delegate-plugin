@@ -303,7 +303,7 @@ Earlier versions had a forwarding subagent run a script in a loop: start a job, 
 
 ### A turn is many short steps
 
-Claude Code ends a background subagent whose model request has been silent for ten minutes, and a delegate's turn can be silent for much longer: one long command, or a question waiting for you. So the plugin does not hold one request open for the whole turn. The turn runs on by itself, and each request of the subagent's loop is answered at once with a row: a tool call the plugin writes, which waits when the delegate has done something more. The last request is answered with the report. A turn can take as long as the backend takes, and what it did on the way can be read row by row.
+Claude Code ends a background subagent whose model request has been silent for ten minutes, and a delegate's turn can be silent for much longer: one long command, or a question waiting for you. So the plugin does not hold one request open for the whole turn. The turn runs on by itself, and each request of the subagent's loop is answered at once with a row: a tool call the plugin writes, which waits and returns when the delegate has done something more. The last request is answered with the report. A turn can take as long as the backend takes, and what it did on the way can be read row by row.
 
 ### A report the review has seen
 

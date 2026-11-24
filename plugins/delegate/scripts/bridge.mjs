@@ -158,6 +158,17 @@ async function cmdRun() {
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
+  // A session takes one turn at a time. Another turn of this workspace that is still running
+  // on the session this one continues is found in the records, before this one's own is written.
+  let busy = null;
+  if (request.resumeSessionId) {
+    try {
+      busy = listJobs(request.cwd).find((job) => isActive(job) && job.backend === backend.name && job.sessionId === request.resumeSessionId) ?? null;
+    } catch {
+      busy = null;
+    }
+  }
+
   // The turn's record. Keeping it never fails the turn: where it cannot be written, the
   // turn runs without one.
   let jobId = null;
@@ -181,7 +192,7 @@ async function cmdRun() {
       status: "running",
       pid: process.pid,
       createdAt: new Date().toISOString(),
-      sessionId: null
+      sessionId: request.resumeSessionId ?? null
     });
     jobId = job.id;
     pruneJobs(request.cwd);
@@ -232,6 +243,9 @@ async function cmdRun() {
   const traceFile = traceFileFor(backend.name);
   let result;
   try {
+    if (busy) {
+      throw new Error(`session ${request.resumeSessionId} is in use: turn ${busy.id} is still running on it. Wait for that turn to end, or stop it, and send this again.`);
+    }
     result = await backend.run({
       cwd: request.cwd,
       prompt: request.prompt,
@@ -248,7 +262,7 @@ async function cmdRun() {
   } catch (error) {
     result = {
       status: controller.signal.aborted ? "cancelled" : "failed",
-      sessionId: openedSession,
+      sessionId: openedSession ?? request.resumeSessionId ?? null,
       model: shown.model,
       text: "",
       actions: [],

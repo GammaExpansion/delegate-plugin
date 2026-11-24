@@ -140,7 +140,7 @@ A turn ends early when its subagent is stopped, when the plugin is reloaded or u
 
 The delegate remembers its whole conversation, the turn that was cut off included. A command that was running when the turn ended was stopped with it, so ask the delegate to check what state it left things in before it goes on.
 
-If the backend cannot load the session any more, the turn fails and says so. That conversation is over: a new one has to be started and told what it needs to know.
+If the backend cannot load the session any more, the turn fails and says so. That conversation is over: a new one has to be started and told what it needs to know. A session takes one turn at a time: a turn sent while another is still running on the same session is refused, and names the turn that is in the way.
 
 ### Progress and reports
 

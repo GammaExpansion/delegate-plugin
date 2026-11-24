@@ -500,7 +500,7 @@ export const codexBackend = {
           // A conversation whose session is gone (its rollout deleted, another CODEX_HOME)
           // is not gone on with in a new one: a delegate that has lost what it knew, and
           // works on as if it had not, is worse than a turn that fails and says why.
-          throw new Error(`Codex could not resume session ${resumeSessionId}: ${error?.message ?? error}. Its conversation cannot be gone on with: nothing was started in its place. Start a new delegate for a new conversation.`);
+          throw new Error(`Codex could not resume session ${resumeSessionId}: ${error?.message ?? error}. The turn was not run, and no new session was started in its place. If another turn is still using that session, wait for it to end; if the session is gone, only a new delegate, with a new conversation, can go on.`);
         }
       }
       opened ??= await client.request("thread/start", { ephemeral: false, ...threadParams });

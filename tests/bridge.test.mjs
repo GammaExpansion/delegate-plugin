@@ -309,7 +309,7 @@ test("a session that cannot be continued fails the turn, and no new session is s
     { env: { FAKE_CODEX_SCENARIO: "normal", FAKE_CODEX_RESUME_FAILS: "1", FAKE_CODEX_RECORD: record } }
   );
   assert.equal(codex.result.result.status, "failed");
-  assert.match(codex.result.report, /^\[delegate\] Codex Agent · failed · \d+\.\ds · read-only · task-[a-z0-9]+\nerror: Codex could not resume session gone-thread: no rollout found for thread\. Its conversation cannot be gone on with: nothing was started in its place\. Start a new delegate for a new conversation\.$/);
+  assert.match(codex.result.report, /^\[delegate\] Codex Agent · failed · \d+\.\ds · read-only · task-[a-z0-9]+\nsession: gone-thread\nerror: Codex could not resume session gone-thread: no rollout found for thread\. The turn was not run, and no new session was started in its place\./);
   assert.equal(fs.existsSync(record), false, "no thread was opened");
   assert.ok(!codex.events.some((event) => event.type === "event" && event.event.type === "session"));
 
@@ -318,8 +318,7 @@ test("a session that cannot be continued fails the turn, and no new session is s
     { env: { FAKE_AGY_SCENARIO: "replay-late", FAKE_AGY_LOAD_FAILS: "1" } }
   );
   assert.equal(agy.result.result.status, "failed");
-  assert.match(agy.result.report, /error: agy could not resume session gone-session: session not found\. Its conversation cannot be gone on with/);
-  assert.doesNotMatch(agy.result.report, /^session: /m);
+  assert.match(agy.result.report, /error: agy could not resume session gone-session: session not found\. The turn was not run, and no new session was started/);
   assert.ok(!agy.events.some((event) => event.type === "event" && event.event.type === "session"));
 });
 
@@ -418,6 +417,28 @@ test("a turn whose bridge was killed is on record as failed, not as running for 
     }
   );
   assert.match(ask("status", id).out, /· failed · [^\n]*\n[\s\S]*error: The turn's process ended without recording a result/);
+});
+
+test("a session takes one turn at a time: a second turn on it is refused while the first runs", async () => {
+  let second = null;
+  const first = await runTurn(
+    { backend: "codex", permission: "read-only", approvals: "ask", resumeSessionId: "thread-main" },
+    {
+      env: { FAKE_CODEX_SCENARIO: "approval" },
+      onEvent: (event, ctx) => {
+        if (event.type !== "approval") return;
+        // The first turn now waits for an answer, with its session on record.
+        second = runTurn({ backend: "codex", permission: "read-only", resumeSessionId: "thread-main" }, { env: { FAKE_CODEX_SCENARIO: "normal" } }).then((turn) => {
+          answer(ctx, event.id, { choice: "accept" });
+          return turn;
+        });
+      }
+    }
+  );
+  const refused = await second;
+  assert.equal(refused.result.result.status, "failed");
+  assert.match(refused.result.report, /error: session thread-main is in use: turn task-[a-z0-9]+ is still running on it\. Wait for that turn to end, or stop it, and send this again\./);
+  assert.equal(first.result.result.status, "completed");
 });
 
 test("wait returns a turn's log from an offset on, and nothing more once it has been read", async () => {

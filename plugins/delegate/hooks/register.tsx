@@ -397,7 +397,7 @@ async function runDelegate(
   for (const text of run.missed.values()) {
     notes.push(`a message sent to this delegate while it worked was not passed on to it. Send it again to go on: "${oneLine(text, 200)}"`)
   }
-  return withNotes(outcome.report ?? `[delegate] ${run.label} · failed\nerror: ${outcome.error ?? 'unknown'}`, notes)
+  return withNotes(outcome.report ?? failed(backend, outcome.error ?? 'unknown'), notes)
 }
 
 /** Whether this run of the delegate hands its report back through the tool, or says it. */
@@ -422,7 +422,7 @@ function startRun($: EngineInterface, turnId: string, agentId: string, backend: 
     turnId,
     spawn,
     startedAt: Date.now(),
-    label: AGENT_NAME[backend],
+    label: labelOf(backend, null, null),
     line: 'starting',
     cwd: null,
     control: null,

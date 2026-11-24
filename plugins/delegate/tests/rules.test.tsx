@@ -103,12 +103,13 @@ test('what the user allowed a conversation covers the same or less, and no more'
   expect(covers('agy', { permission: 'auto', sandbox: null }, { permission: 'skip-permissions', sandbox: null })).toBe(false)
 })
 
-test("a delegate's title names the model its prompt asks for", async () => {
-  expect(titleOf('agy', 'Gemini Agent: Neon reviews BE-14', 'gemini-4-neon-xhigh', null)).toBe('Gemini Agent (gemini-4-neon-xhigh): Neon reviews BE-14')
-  expect(titleOf('codex', 'Codex Agent: Astra BE-15 contract', 'gpt-6.2-astra', 'xhigh')).toBe('Codex Agent (gpt-6.2-astra xHigh): Astra BE-15 contract')
-  // A title that does not begin with the agent's name gets it in front.
-  expect(titleOf('codex', 'review token refresh', 'gpt-6.2-astra', 'high')).toBe('Codex Agent (gpt-6.2-astra high): review token refresh')
-  // No model asked for, or one Claude already wrote: the title stays as it is.
-  expect(titleOf('codex', 'Codex Agent: review token refresh', null, 'high')).toBe('Codex Agent: review token refresh')
-  expect(titleOf('agy', 'Gemini Agent (gemini-4-carbon-high) - AND-5c', 'gemini-4-carbon-high', null)).toBe('Gemini Agent (gemini-4-carbon-high) - AND-5c')
+test("a delegate's title is its short name, the model its prompt asks for, and Claude's words", async () => {
+  expect(titleOf('agy', 'Gemini Agent: Neon reviews BE-14', 'gemini-4-neon-xhigh', null)).toBe('Gemini (gemini-4-neon-xhigh): Neon reviews BE-14')
+  expect(titleOf('codex', 'Codex: Astra BE-15 contract', 'gpt-6.2-astra', 'xhigh')).toBe('Codex (gpt-6.2-astra xHigh): Astra BE-15 contract')
+  // A title that does not begin with the name gets it in front.
+  expect(titleOf('codex', 'review token refresh', 'gpt-6.2-astra', 'low')).toBe('Codex (gpt-6.2-astra low): review token refresh')
+  // No model asked for: the short name alone.
+  expect(titleOf('codex', 'Codex Agent: review token refresh', null, 'high')).toBe('Codex: review token refresh')
+  // A model Claude already wrote is not written twice.
+  expect(titleOf('agy', 'Gemini Agent (gemini-4-carbon-high) - AND-5c', 'gemini-4-carbon-high', null)).toBe('Gemini (gemini-4-carbon-high) - AND-5c')
 })

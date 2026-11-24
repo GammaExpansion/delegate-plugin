@@ -15,24 +15,27 @@ export const PRODUCT: Record<Backend, string> = { codex: 'Codex', agy: 'Antigrav
 
 const agentType = (backend: Backend) => `delegate:${backend}`
 
-/** "Codex Agent (gpt-6.2-astra xHigh)", or the bare name while the model is not known. */
+/** The short name a delegate goes by in the lists of tasks and rows, where room is scarce. */
+const SHORT_NAME: Record<Backend, string> = { codex: 'Codex', agy: 'Gemini' }
+
+/** "Codex (gpt-6.2-astra xHigh)", or the bare short name while the model is not known. */
 export function labelOf(backend: Backend, model: string | null, effort: string | null): string {
-  if (model === null) return AGENT_NAME[backend]
+  if (model === null) return SHORT_NAME[backend]
   const level = effort === null ? '' : effort.toLowerCase() === 'xhigh' ? ' xHigh' : ` ${effort.toLowerCase()}`
-  return `${AGENT_NAME[backend]} (${model}${level})`
+  return `${SHORT_NAME[backend]} (${model}${level})`
 }
 
 /**
- * The title a delegate's task is shown under: Claude's own few words for it, with the
- * model and effort the prompt asks for put after the agent's name, as in
- * "Gemini Agent (gemini-4-carbon-high): review the diff". A prompt that names no model
- * leaves the title as it is: which model the backend picks is not known yet.
+ * The title a delegate's task is shown under: Claude's own few words for it, behind the
+ * delegate's short name and the model and effort the prompt asks for, as in
+ * "Gemini (gemini-4-carbon-high): review the diff". With no model asked for it is
+ * "Gemini: review the diff": which model the backend picks is not known yet.
  */
 export function titleOf(backend: Backend, description: string, model: string | null, effort: string | null): string {
-  if (model === null || description.includes(model)) return description
-  const name = AGENT_NAME[backend]
-  const label = labelOf(backend, model, effort)
-  return description.startsWith(name) ? `${label}${description.slice(name.length)}` : `${label}: ${description}`
+  const long = AGENT_NAME[backend]
+  const short = SHORT_NAME[backend]
+  const rest = description.startsWith(long) ? description.slice(long.length) : description.startsWith(short) ? description.slice(short.length) : `: ${description}`
+  return `${model === null || description.includes(model) ? short : labelOf(backend, model, effort)}${rest}`
 }
 
 export function backendOfType(type: string | undefined): Backend | undefined {
@@ -67,7 +70,7 @@ export const AGENT_SPECS: Record<Backend, { name: string; description: string; p
       "Codex runs OpenAI's GPT models, which go by names such as Astra, Sol, Terra, Luna and Codex Spark, as in gpt-6.2-astra.",
       'Use it whenever the user asks for Codex, GPT or one of those models, however small the task, or when a second opinion from another vendor\'s model is worth the wait. Do not pick it on your own for small tasks.',
       SHARED('Codex', 'and --effort <level> for its reasoning effort'),
-      'Start the call\'s description with "Codex Agent", then the task in a few words.',
+      'Start the call\'s description with "Codex:", then the task in a few words.',
     ].join(' '),
     prompt: RELAY_PROMPT,
   },
@@ -78,7 +81,7 @@ export const AGENT_SPECS: Record<Backend, { name: string; description: string; p
       "Antigravity runs Google's Gemini models, which go by names such as Neon, Carbon, Argon, Hydrogen and Flash.",
       'Use it whenever the user asks for Antigravity, agy, Gemini or one of those models, however small the task, or when a second opinion from another vendor\'s model is worth the wait. Do not pick it on your own for small tasks.',
       SHARED('Antigravity', 'an id ends in its thinking level, as in gemini-4-neon-high'),
-      'Start the call\'s description with "Gemini Agent", then the task in a few words.',
+      'Start the call\'s description with "Gemini:", then the task in a few words.',
     ].join(' '),
     prompt: RELAY_PROMPT,
   },

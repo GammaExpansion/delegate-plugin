@@ -144,19 +144,19 @@ If the backend cannot load the session any more, the turn fails and says so. Tha
 
 ### Progress and reports
 
-While a delegate works, the line under its Agent row says who it is and what it did last:
+A delegate's task is listed under a title that names its model: with `--model` on the prompt's first line, Claude's "Codex: review the diff" is shown as "Codex (gpt-6.2-astra xHigh): review the diff". While it works, the line under its Agent row says who it is and what it did last:
 
 ```text
-⎿ Codex Agent (gpt-6.2-astra) · 12s · command completed (exit 0): cat src/auth.ts
+⎿ Codex (gpt-6.2-astra) · 12s · command completed (exit 0): cat src/auth.ts
 ```
 
 Open the subagent and its turn is a list of rows, one for each stretch of work, each with how long it took:
 
 ```text
-Codex Agent · 0s · starting
-Codex Agent (gpt-6.2-astra) · 4s · message: I'll run the tests, then read the three latest commits.
-Codex Agent (gpt-6.2-astra) · 9s · running command: npm test
-Codex Agent (gpt-6.2-astra) · 34s · command completed (exit 0): npm test
+Codex · 0s · starting
+Codex (gpt-6.2-astra) · 4s · message: I'll run the tests, then read the three latest commits.
+Codex (gpt-6.2-astra) · 9s · running command: npm test
+Codex (gpt-6.2-astra) · 34s · command completed (exit 0): npm test
 ```
 
 A row's title is what the delegate had just done when the row began, and what the row holds is the delegate's log for that stretch. A turn's first minute is shown step by step; a long turn makes about one row a minute. The rows are drawn as shell commands, because that is the kind of row Claude Code titles with a description, but no command is run for them: each shows `: progress of the delegate - this row runs no command`.

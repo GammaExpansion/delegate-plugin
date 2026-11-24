@@ -48,7 +48,7 @@ type BackendEvent =
 type RunResult = { status: 'completed' | 'cancelled' | 'failed'; sessionId: string | null; model: string | null }
 
 type BridgeEvent =
-  | { type: 'ready'; controlDir: string; token: string; jobId: string | null }
+  | { type: 'ready'; controlDir: string; token: string; jobId: string | null; jobDir?: string | null }
   | { type: 'event'; event: BackendEvent }
   | { type: 'approval'; id: number; request: ApprovalRequest }
   | { type: 'result'; result: RunResult; report: string }
@@ -58,6 +58,8 @@ type BridgeEvent =
 export type TurnControl = {
   /** The id of the turn's record, which `bridge.mjs wait` follows; null where no record could be kept. */
   jobId: string | null
+  /** The directory the record is in, for a `wait` run from a shell. */
+  jobDir: string | null
   /** Says that the turn is still being followed, which keeps its lease. */
   follow: () => Promise<void>
   /** Stops the turn: the bridge interrupts the backend, records how far it got, and ends. */
@@ -143,7 +145,7 @@ export async function runTurn($: EngineInterface, request: TurnRequest, hooks: T
         const write = async (name: string) => {
           if (!ended) await $.fs.write(`${dir}/${name}`, JSON.stringify({ token: sign, at: Date.now() })).catch(() => {})
         }
-        hooks.onReady({ jobId: event.jobId, follow: () => write('alive'), cancel: () => write('cancel') })
+        hooks.onReady({ jobId: event.jobId, jobDir: event.jobDir ?? null, follow: () => write('alive'), cancel: () => write('cancel') })
         return
       }
       case 'event': {

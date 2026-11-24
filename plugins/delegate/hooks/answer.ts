@@ -7,9 +7,11 @@
 // says the report as words.
 //
 // A turn takes many steps. While the backend works, each step is a row: a call of the Bash
-// tool that this plugin writes and answers itself, and that runs no command. Claude Code
-// shows such a call by its description, so the rows read as what the delegate did, one
-// after the other, and no step is long enough to be taken for a stalled agent.
+// tool that this plugin writes. It runs one command, the bridge's `wait`, which returns
+// when the delegate has done something more; where that command cannot be run, the plugin
+// answers the call itself. Claude Code shows such a call by its description and lists it
+// among the agent's tasks, so the rows read as what the delegate did, one after the other,
+// and no step is long enough to be taken for a stalled agent.
 
 import type { EngineInterface, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
@@ -40,14 +42,18 @@ export async function* say(e: TurnStepInput, text: string): Step {
   return { turnId: e.turnId, index: e.index, answer: text, toolUses: [], stopReason: 'end_turn', usage: null }
 }
 
-/** What a row's Bash call carries as its command: a shell no-op, should anything ever run it. */
-const ROW_COMMAND = ': progress of the delegate - this row runs no command'
+/** What a row carries as its command when the plugin answers it itself: a shell no-op, should anything ever run it. */
+const HELD_ROW = ': progress of the delegate - this row runs no command'
 
-/** A stretch of the delegate's work as a row, titled with what it did last. Returns the call's id through `onId`. */
-export async function* row(e: TurnStepInput, title: string, onId: (id: string) => void): Step {
+/**
+ * A stretch of the delegate's work as a row, titled with what it did last. `command` is
+ * what the row runs; left out, the row runs nothing and is answered by the plugin.
+ * Returns the call's id through `onId`.
+ */
+export async function* row(e: TurnStepInput, title: string, onId: (id: string) => void, command?: string): Step {
   const id = newToolUseId()
   onId(id)
-  const input = { command: ROW_COMMAND, description: title }
+  const input = command === undefined ? { command: HELD_ROW, description: title } : { command, description: title, timeout: 150_000 }
   yield { kind: 'tool', index: 0, id, name: 'Bash' }
   yield { kind: 'input', index: 0, json: JSON.stringify(input) }
   yield { kind: 'stop', stopReason: 'tool_use', usage: null }

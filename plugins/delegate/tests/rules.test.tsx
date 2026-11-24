@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { takeOptions } from '../hooks/options'
-import { askedFor, describe, grantFor } from '../hooks/permissions'
+import { askedFor, covers, describe, grantFor } from '../hooks/permissions'
 
 test('each permission mode gives each backend its closest option', async () => {
   expect(grantFor('codex', 'plan')).toEqual({ mode: 'plan', permission: 'read-only', approvals: 'decline', sandbox: null })
@@ -89,4 +89,15 @@ test('an option the backend lacks, or Codex read-only without its sandbox, is re
   expect('error' in askedFor('agy', grantFor('agy', 'auto'), null, 'disabled')).toBe(true)
   expect('error' in askedFor('agy', grantFor('agy', 'default'), 'auto', 'disabled')).toBe(true)
   expect('error' in askedFor('agy', grantFor('agy', 'auto'), 'accept-edits', 'disabled')).toBe(false)
+})
+
+test('what the user allowed a conversation covers the same or less, and no more', async () => {
+  const allowed = { permission: 'full-access', sandbox: null }
+  expect(covers('codex', allowed, { permission: 'full-access', sandbox: null })).toBe(true)
+  expect(covers('codex', allowed, { permission: 'approve-for-me', sandbox: 'disabled' })).toBe(true)
+  expect(covers('codex', { permission: 'approve-for-me', sandbox: null }, { permission: 'full-access', sandbox: null })).toBe(false)
+  // The same option without its sandbox is more than was allowed.
+  expect(covers('codex', { permission: 'approve-for-me', sandbox: null }, { permission: 'approve-for-me', sandbox: 'disabled' })).toBe(false)
+  expect(covers('agy', { permission: 'skip-permissions', sandbox: null }, { permission: 'auto', sandbox: null })).toBe(true)
+  expect(covers('agy', { permission: 'auto', sandbox: null }, { permission: 'skip-permissions', sandbox: null })).toBe(false)
 })

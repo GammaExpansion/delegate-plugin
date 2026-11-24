@@ -294,7 +294,7 @@ export const codexBackend = {
    * @param {import("./index.mjs").RunOptions} options
    * @returns {Promise<import("./index.mjs").RunResult>}
    */
-  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, resumeNamed, signal, traceFile, onEvent, onApproval }) {
+  async run({ cwd, prompt, permission, sandbox, model, effort, resumeSessionId, signal, traceFile, onEvent, onApproval }) {
     const { settings: policy } = settingsFor({ permission, sandbox });
     const client = new StdioRpcClient({ command: "codex", args: ["app-server"], cwd, traceFile }).start();
     const actions = [];
@@ -497,12 +497,10 @@ export const codexBackend = {
         try {
           opened = await client.request("thread/resume", { threadId: resumeSessionId, excludeTurns: true, ...threadParams });
         } catch (error) {
-          // A session the caller named is the whole point of the turn: without it, nothing runs.
-          if (resumeNamed) throw new Error(`Codex could not resume session ${resumeSessionId}: ${error?.message ?? error}`);
           // A conversation whose session is gone (its rollout deleted, another CODEX_HOME)
-          // goes on in a new one rather than failing every turn from here on.
-          notes.push(`the earlier Codex session could not be resumed (${error?.message ?? error}), so this turn started a new one, which knows nothing of the earlier conversation`);
-          resumeSessionId = undefined;
+          // is not gone on with in a new one: a delegate that has lost what it knew, and
+          // works on as if it had not, is worse than a turn that fails and says why.
+          throw new Error(`Codex could not resume session ${resumeSessionId}: ${error?.message ?? error}. The turn was not run, and no new session was started in its place. If another turn is still using that session, wait for it to end; if the session is gone, only a new delegate, with a new conversation, can go on.`);
         }
       }
       opened ??= await client.request("thread/start", { ephemeral: false, ...threadParams });

@@ -1,6 +1,6 @@
 {
   "name": "delegate",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Hand tasks to Codex or Antigravity as Claude Code subagents, with the conversation's own permissions.",
   "author": {
     "name": "GammaExpansion",
